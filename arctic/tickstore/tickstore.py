@@ -818,7 +818,13 @@ class TickStore(object):
             rtn[IMAGE_DOC] = {IMAGE_TIME: image_start, IMAGE: initial_image}
         rtn[END] = end
         rtn[START] = start
-        rtn[INDEX] = Binary(lz4_compressHC(np.concatenate(([data['index'][0]], np.diff(data['index']))).tobytes()))
+        if isinstance(data['index'][0], np.datetime64):
+            idx = np.concatenate(([data['index'][0]], np.diff(data['index'])), casting='unsafe')
+            # causal conversion ns -> ms
+            idx = np.floor_divide(idx.astype(np.uint64) + np.uint64(1_000_000-1), np.uint64(1_000_000))
+        else:
+            idx = np.concatenate(([data['index'][0]], np.diff(data['index'])))
+        rtn[INDEX] = Binary(lz4_compressHC(idx.tobytes()))
         return rtn, final_image
 
     def max_date(self, symbol):

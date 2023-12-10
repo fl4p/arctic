@@ -2,6 +2,8 @@ import calendar
 import datetime
 import sys
 from datetime import timedelta
+
+import numpy as np
 import pandas as pd
 
 from ._daterange import DateRange
@@ -104,6 +106,11 @@ def to_dt(date, default_tz=None):
     """
     if isinstance(date, (int, long)):
         return ms_to_datetime(date, default_tz)
+    elif isinstance(date, np.datetime64):
+        if not default_tz:
+            return np.datetime64(date, "ms").astype(datetime.datetime)
+        return np.datetime64(date, "ms").astype(datetime.datetime).replace(tzinfo=default_tz)
+        # return datetime.datetime.fromtimestamp(date.astype(int)/int(1e-9), tz=default_tz)
     elif date.tzinfo is None:
         if default_tz is None:
             raise ValueError("Must specify a TimeZone on incoming data")
