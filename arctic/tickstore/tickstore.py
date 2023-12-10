@@ -22,17 +22,19 @@ try:
 except ImportError:
     from pandas.lib import infer_dtype
 
-from ..date import DateRange, to_pandas_closed_closed, mktz, datetime_to_ms, ms_to_datetime, CLOSED_CLOSED, to_dt, utc_dt_to_local_dt
+from ..date import DateRange, to_pandas_closed_closed, mktz, datetime_to_ms, ms_to_datetime, CLOSED_CLOSED, to_dt, \
+    utc_dt_to_local_dt
 from ..decorators import mongo_retry
-from ..exceptions import OverlappingDataException, NoDataFoundException, UnorderedDataException, UnhandledDtypeException, ArcticException
+from ..exceptions import OverlappingDataException, NoDataFoundException, UnorderedDataException, \
+    UnhandledDtypeException, ArcticException
 from .._util import indent
 
 try:
     from lz4.block import compress as lz4_compress, decompress as lz4_decompress
+
     lz4_compressHC = lambda _str: lz4_compress(_str, mode='high_compression')
 except ImportError as e:
     from lz4 import compress as lz4_compress, compressHC as lz4_compressHC, decompress as lz4_decompress
-
 
 PD_VER = pd.__version__
 logger = logging.getLogger(__name__)
@@ -87,7 +89,7 @@ DATA = 'd'
 DTYPE = 't'
 IMAGE_TIME = 't'
 ROWMASK = 'm'
-GAIN = 'g' # factor, (pre)scaler, gain,
+GAIN = 'g'  # factor, (pre)scaler, gain,
 
 COUNT = 'c'
 VERSION = 'v'
@@ -98,8 +100,8 @@ CHUNK_VERSION_NUMBER = 3
 CHUNK_VERSION_NUMBER_MAX = 4
 
 
-#version.parse(pandas.__version__) > version.parse('1.0')
-#IS_PANDAS_1x = version.parse(pandas.__version__) > version.parse('1.0')
+# version.parse(pandas.__version__) > version.parse('1.0')
+# IS_PANDAS_1x = version.parse(pandas.__version__) > version.parse('1.0')
 
 
 class TickStore(object):
@@ -234,7 +236,7 @@ class TickStore(object):
             assert date_range.end.tzinfo
             last_dt = date_range.end
         else:
-            logger.info("No end provided.  Loading a month for: {}:{}".format(symbol, first_dt))
+            logger.warning("No end provided.  Loading a month for: {}:{}".format(symbol, first_dt))
             if not first_dt:
                 first_doc = self._collection.find_one(self._symbol_query(symbol),
                                                       projection={START: 1, ID: 0},
@@ -321,11 +323,11 @@ class TickStore(object):
 
         column_dtypes = {}
         ticks_read = 0
-        bytes_i = 0 # compressed index size
+        bytes_i = 0  # compressed index size
         bytes_d = 0
         bytes_m = 0
         data_coll = self._collection.with_options(read_preference=self._read_preference(allow_secondary))
-        for b in data_coll.find(query, projection=projection).sort([(START, pymongo.ASCENDING)],):
+        for b in data_coll.find(query, projection=projection).sort([(START, pymongo.ASCENDING)], ):
             data = self._read_bucket(b, column_set, column_dtypes,
                                      multiple_symbols or (columns is not None and 'SYMBOL' in columns),
                                      include_images, columns)
@@ -343,8 +345,7 @@ class TickStore(object):
             if _target_tick_count and ticks_read > _target_tick_count:
                 break
 
-
-        self.last_read_bytes = bytes_i, bytes_d,bytes_m
+        self.last_read_bytes = bytes_i, bytes_d, bytes_m
 
         if not rtn:
             raise NoDataFoundException("No Data found for {} in range: {}".format(symbol, date_range))
@@ -369,12 +370,11 @@ class TickStore(object):
         t = (dt.now() - perf_start).total_seconds()
         logger.info("Got data in %s secs, creating DataFrame..." % t)
         if pd.__version__.startswith("0.") or pd.__version__.startswith("1.0"):
-            mgr = _arrays_to_mgr(arrays, columns, index,  dtype=None)
+            mgr = _arrays_to_mgr(arrays, columns, index, dtype=None)
         else:
             # if pd.__version__
-            # new argument typ is mandatory
-            mgr = _arrays_to_mgr(arrays, columns, index,  dtype=None, typ="array")
-
+            # new argument typ is mandatory            
+            mgr = _arrays_to_mgr(arrays, columns, index, dtype=None, typ="array")
 
         rtn = pd.DataFrame(mgr)
         # Present data in the user's default TimeZone
@@ -505,14 +505,14 @@ class TickStore(object):
                 # copy it into a bytearray here for safety.
                 values = np.frombuffer(bytearray(lz4_decompress(coldata[DATA])), dtype=dtype)
                 if GAIN in coldata:
-                    assert values.dtype == np.float16 # TODO
+                    assert values.dtype == np.float16  # TODO
                     values = values.astype(np.float32) * coldata[GAIN]
                     dtype = np.float32
                 self._set_or_promote_dtype(column_dtypes, c, dtype)
                 rtn[c] = self._empty(rtn_length, dtype=column_dtypes[c])
                 # unpackbits will make a copy of the read-only array created by frombuffer
                 rowmask = np.unpackbits(np.frombuffer(lz4_decompress(coldata[ROWMASK]),
-                                        dtype='uint8'))[:doc_length].astype('bool')
+                                                      dtype='uint8'))[:doc_length].astype('bool')
                 rowmask = rowmask[union_mask]
                 rtn[c][rowmask] = values
             except KeyError:
@@ -547,7 +547,7 @@ class TickStore(object):
             if sharding:
                 res['sharding'].update(sharding)
             res['sharding']['collections'] = list(conn.config.collections.find(
-                                                  {'_id': {'$regex': '^' + db.name + r"\..*"}}))
+                {'_id': {'$regex': '^' + db.name + r"\..*"}}))
         except OperationFailure:
             # Access denied
             pass
@@ -640,14 +640,16 @@ class TickStore(object):
     def _pandas_to_buckets(self, x, symbol, initial_image, to_dtype=None):
         rtn = []
         for i in range(0, len(x), self._chunk_size):
-            bucket, initial_image = TickStore._pandas_to_bucket(x[i:i + self._chunk_size], symbol, initial_image,to_dtype=to_dtype)
+            bucket, initial_image = TickStore._pandas_to_bucket(x[i:i + self._chunk_size], symbol, initial_image,
+                                                                to_dtype=to_dtype)
             rtn.append(bucket)
         return rtn
 
     def _to_buckets(self, x, symbol, initial_image, to_dtype=None):
         rtn = []
         for i in range(0, len(x), self._chunk_size):
-            bucket, initial_image = TickStore._to_bucket(x[i:i + self._chunk_size], symbol, initial_image, to_dtype=to_dtype)
+            bucket, initial_image = TickStore._to_bucket(x[i:i + self._chunk_size], symbol, initial_image,
+                                                         to_dtype=to_dtype)
             rtn.append(bucket)
         return rtn
 
@@ -707,7 +709,8 @@ class TickStore(object):
             except:
                 raise UnhandledDtypeException("Only unicode and utf8 strings are supported.")
         else:
-            raise UnhandledDtypeException("Unsupported dtype '%s' - only int64, float64 and U are supported" % array.dtype)
+            raise UnhandledDtypeException(
+                "Unsupported dtype '%s' - only int64, float64 and U are supported" % array.dtype)
         # Everything is little endian in tickstore
         if array.dtype.byteorder != '<':
             array = array.astype(array.dtype.newbyteorder('<'))
