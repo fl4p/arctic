@@ -825,9 +825,9 @@ class TickStore(object):
         rtn[END] = end
         rtn[START] = start
         if isinstance(data['index'][0], np.datetime64):
-            idx = np.concatenate(([data['index'][0]], np.diff(data['index'])), casting='unsafe')
+            idx = np.concatenate(([data['index'][0].astype(np.uint64)], np.diff(data['index']).astype(np.uint64)))
             # causal conversion ns -> ms
-            idx = np.floor_divide(idx.astype(np.uint64) + np.uint64(1_000_000-1), np.uint64(1_000_000))
+            idx = np.floor_divide(idx + np.uint64(1_000_000-1), np.uint64(1_000_000))
         else:
             idx = np.concatenate(([data['index'][0]], np.diff(data['index'])))
         rtn[INDEX] = Binary(lz4_compressHC(idx.tobytes()))
