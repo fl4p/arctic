@@ -87,6 +87,7 @@ DATA = 'd'
 DTYPE = 't'
 IMAGE_TIME = 't'
 ROWMASK = 'm'
+GAIN = 'g' # factor, (pre)scaler, gain,
 
 COUNT = 'c'
 VERSION = 'v'
@@ -94,6 +95,11 @@ VERSION = 'v'
 META = 'md'
 
 CHUNK_VERSION_NUMBER = 3
+CHUNK_VERSION_NUMBER_MAX = 4
+
+
+#version.parse(pandas.__version__) > version.parse('1.0')
+#IS_PANDAS_1x = version.parse(pandas.__version__) > version.parse('1.0')
 
 
 class TickStore(object):
@@ -456,7 +462,7 @@ class TickStore(object):
 
     def _read_bucket(self, doc, column_set, column_dtypes, include_symbol, include_images, columns):
         rtn = {}
-        if doc[VERSION] != 3:
+        if doc[VERSION] != 3 and doc[VERSION] != CHUNK_VERSION_NUMBER_MAX:
             raise ArcticException("Unhandled document version: %s" % doc[VERSION])
         # np.cumsum copies the read-only array created with frombuffer
         rtn[INDEX] = np.cumsum(np.frombuffer(lz4_decompress(doc[INDEX]), dtype='uint64'))
@@ -488,6 +494,10 @@ class TickStore(object):
                 # values ends up being copied by pandas before being returned to the user. However, we
                 # copy it into a bytearray here for safety.
                 values = np.frombuffer(bytearray(lz4_decompress(coldata[DATA])), dtype=dtype)
+                if GAIN in coldata:
+                    assert values.dtype == np.float16 # TODO
+                    values = values.astype(np.float32) * coldata[GAIN]
+                    dtype = np.float32
                 self._set_or_promote_dtype(column_dtypes, c, dtype)
                 rtn[c] = self._empty(rtn_length, dtype=column_dtypes[c])
                 # unpackbits will make a copy of the read-only array created by frombuffer
@@ -566,7 +576,7 @@ class TickStore(object):
                     "Document already exists with start:{} end:{} in the range of our start:{} end:{}".format(
                         doc[START], doc[END], start, end))
 
-    def write(self, symbol, data, initial_image=None, metadata=None):
+    def write(self, symbol, data, initial_image=None, metadata=None, to_dtype=None):
         """
         Writes a list of market data events.
 
@@ -599,9 +609,9 @@ class TickStore(object):
         self._assert_nonoverlapping_data(symbol, to_dt(start), to_dt(end))
 
         if pandas:
-            buckets = self._pandas_to_buckets(data, symbol, initial_image)
+            buckets = self._pandas_to_buckets(data, symbol, initial_image, to_dtype=to_dtype)
         else:
-            buckets = self._to_buckets(data, symbol, initial_image)
+            buckets = self._to_buckets(data, symbol, initial_image, to_dtype=to_dtype)
         self._write(buckets)
 
         if metadata:
@@ -617,17 +627,17 @@ class TickStore(object):
         rate = int(ticks / t) if t != 0 else float("nan")
         logger.debug("%d buckets in %s: approx %s ticks/sec" % (len(buckets), t, rate))
 
-    def _pandas_to_buckets(self, x, symbol, initial_image):
+    def _pandas_to_buckets(self, x, symbol, initial_image, to_dtype=None):
         rtn = []
         for i in range(0, len(x), self._chunk_size):
-            bucket, initial_image = TickStore._pandas_to_bucket(x[i:i + self._chunk_size], symbol, initial_image)
+            bucket, initial_image = TickStore._pandas_to_bucket(x[i:i + self._chunk_size], symbol, initial_image,to_dtype=to_dtype)
             rtn.append(bucket)
         return rtn
 
-    def _to_buckets(self, x, symbol, initial_image):
+    def _to_buckets(self, x, symbol, initial_image, to_dtype=None):
         rtn = []
         for i in range(0, len(x), self._chunk_size):
-            bucket, initial_image = TickStore._to_bucket(x[i:i + self._chunk_size], symbol, initial_image)
+            bucket, initial_image = TickStore._to_bucket(x[i:i + self._chunk_size], symbol, initial_image, to_dtype=to_dtype)
             rtn.append(bucket)
         return rtn
 
@@ -657,7 +667,19 @@ class TickStore(object):
             raise UnhandledDtypeException("Bad dtype '%s'" % dtype)
 
     @staticmethod
-    def _ensure_supported_dtypes(array):
+    def _ensure_supported_dtypes(array, to_dtype=None):
+
+        gain = 0
+        if to_dtype and array.dtype != to_dtype:
+            gain = max(np.max(array) / np.finfo(to_dtype).max,
+                       np.min(array) / np.finfo(to_dtype).min)
+            if gain > 1:
+                array = (array / gain).astype(to_dtype)
+                gain = float(gain)
+            else:
+                array = array.astype(to_dtype)
+                gain = 0
+
         # We only support these types for now, as we need to read them in Java
         if array.dtype.kind == 'i':
             array = array.astype('<i8')
@@ -679,7 +701,7 @@ class TickStore(object):
         # Everything is little endian in tickstore
         if array.dtype.byteorder != '<':
             array = array.astype(array.dtype.newbyteorder('<'))
-        return array
+        return array, gain
 
     @staticmethod
     def _pandas_compute_final_image(df, image, end):
@@ -692,7 +714,7 @@ class TickStore(object):
         return final_image
 
     @staticmethod
-    def _pandas_to_bucket(df, symbol, initial_image):
+    def _pandas_to_bucket(df, symbol, initial_image, to_dtype=None):
         rtn = {SYMBOL: symbol, VERSION: CHUNK_VERSION_NUMBER, COLUMNS: {}, COUNT: len(df)}
         end = to_dt(df.index[-1].to_pydatetime())
         if initial_image:
@@ -719,12 +741,16 @@ class TickStore(object):
             recs = df.to_records()
 
         for col in df:
-            array = TickStore._ensure_supported_dtypes(recs[col])
+            array, gain = TickStore._ensure_supported_dtypes(recs[col], to_dtype=to_dtype)
+
             col_data = {
                 DATA: Binary(lz4_compressHC(array.tobytes())),
                 ROWMASK: rowmask,
                 DTYPE: TickStore._str_dtype(array.dtype),
             }
+            if gain:
+                col_data[GAIN] = gain
+                rtn[VERSION] = max(rtn[VERSION], CHUNK_VERSION_NUMBER_MAX)
             rtn[COLUMNS][col] = col_data
         rtn[INDEX] = Binary(
             lz4_compressHC(np.concatenate(
@@ -734,7 +760,7 @@ class TickStore(object):
         return rtn, final_image
 
     @staticmethod
-    def _to_bucket(ticks, symbol, initial_image):
+    def _to_bucket(ticks, symbol, initial_image, to_dtype=None):
         rtn = {SYMBOL: symbol, VERSION: CHUNK_VERSION_NUMBER, COLUMNS: {}, COUNT: len(ticks)}
         data = {}
         rowmask = {}
@@ -765,10 +791,13 @@ class TickStore(object):
         for k, v in data.items():
             if k != 'index':
                 v = np.array(v)
-                v = TickStore._ensure_supported_dtypes(v)
+                v, gain = TickStore._ensure_supported_dtypes(v, to_dtype=to_dtype)
                 rtn[COLUMNS][k] = {DATA: Binary(lz4_compressHC(v.tobytes())),
                                    DTYPE: TickStore._str_dtype(v.dtype),
                                    ROWMASK: rowmask[k]}
+                if gain:
+                    rtn[COLUMNS][k][GAIN] = gain
+                    rtn[VERSION] = max(rtn[VERSION], CHUNK_VERSION_NUMBER_MAX)
 
         if initial_image:
             image_start = initial_image.get('index', start)
