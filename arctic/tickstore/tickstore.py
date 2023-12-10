@@ -662,7 +662,7 @@ class TickStore(object):
         if array.dtype.kind == 'i':
             array = array.astype('<i8')
         elif array.dtype.kind == 'f':
-            array = array.astype('<f8')
+            array = array.astype('<f%d' % array.dtype.itemsize)
         elif array.dtype.kind in ('O', 'U', 'S'):
             if array.dtype.kind == 'O' and infer_dtype(array) not in ['unicode', 'string', 'bytes']:
                 # `string` in python2 and `bytes` in python3
