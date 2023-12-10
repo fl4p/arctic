@@ -321,6 +321,9 @@ class TickStore(object):
 
         column_dtypes = {}
         ticks_read = 0
+        bytes_i = 0 # compressed index size
+        bytes_d = 0
+        bytes_m = 0
         data_coll = self._collection.with_options(read_preference=self._read_preference(allow_secondary))
         for b in data_coll.find(query, projection=projection).sort([(START, pymongo.ASCENDING)],):
             data = self._read_bucket(b, column_set, column_dtypes,
@@ -333,8 +336,15 @@ class TickStore(object):
                     rtn[k] = [v]
             # For testing
             ticks_read += len(data[INDEX])
+            bytes_i += len(b['i'])
+            bytes_d += sum(len(c['d']) for c in b['cs'].values())
+            bytes_m += sum(len(c['m']) for c in b['cs'].values())
+
             if _target_tick_count and ticks_read > _target_tick_count:
                 break
+
+
+        self.last_read_bytes = bytes_i, bytes_d,bytes_m
 
         if not rtn:
             raise NoDataFoundException("No Data found for {} in range: {}".format(symbol, date_range))
