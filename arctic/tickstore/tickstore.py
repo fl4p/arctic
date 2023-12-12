@@ -635,6 +635,11 @@ class TickStore(object):
     def _write(self, buckets):
         start = dt.now()
         mongo_retry(self._collection.insert_many)(buckets)
+        self.last_write_bytes = (
+            sum(len(b["i"]) for b in buckets),
+            sum(len(c["d"]) for b in buckets for c in b['cs'].values()),
+            sum(len(c["m"]) for b in buckets for c in b['cs'].values()),
+        )
         t = (dt.now() - start).total_seconds()
         ticks = len(buckets) * self._chunk_size
         rate = int(ticks / t) if t != 0 else float("nan")
