@@ -584,6 +584,8 @@ class TickStore(object):
         if doc:
             if not doc[END].tzinfo:
                 doc[END] = doc[END].replace(tzinfo=mktz('UTC'))
+            if not start.tzinfo:
+                start = start.replace(tzinfo=mktz('UTC'))
             if doc[END] > start:
                 raise OverlappingDataException(
                     "Document already exists with start:{} end:{} in the range of our start:{} end:{}".format(
