@@ -16,3 +16,5 @@ junit.xml
 /tmp/
 
 *.sw[op]
+
+.DS_Store
