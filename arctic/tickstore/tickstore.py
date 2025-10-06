@@ -677,6 +677,7 @@ class TickStore(object):
         rtn = []
         for i in range(0, len(x), self._chunk_size):
             bucket, initial_image = TickStore._to_bucket(x[i:i + self._chunk_size], symbol, initial_image,
+                                                         index_precision=self._index_precision,
                                                          to_dtype=to_dtype)
             rtn.append(bucket)
         return rtn
@@ -801,9 +802,10 @@ class TickStore(object):
         return rtn, final_image
 
     @staticmethod
-    def _to_bucket(ticks, symbol, initial_image, index_precision='ms', varint_coding=False, to_dtype=None):
+    def _to_bucket(ticks, symbol, initial_image, index_precision='ms', varint_coding=None, to_dtype=None):
         if index_precision != 'ms':
-            assert varint_coding
+            assert varint_coding is None or varint_coding == True
+            varint_coding = True
         rtn = {SYMBOL: symbol,
                VERSION: CHUNK_VERSION_NUMBER if index_precision == 'ms' and not varint_coding else CHUNK_VERSION_NUMBER + 1,
                COLUMNS: {}, COUNT: len(ticks)}
