@@ -122,6 +122,7 @@ def test_tickstore_to_bucket_with_image():
         import tzlocal
         assert tzlocal.get_localzone().zone, "install tzlocal<=1.4"
         assert int(TickStore._to_ms(t) / 1000) == 1388534460
+        assert pd.to_datetime(TickStore._to_ms(t), utc=True, unit='ms') == t
         assert dt.fromtimestamp(int(TickStore._to_ms(t) / 1000), tz=mktz(tz)) == t
         assert dt.fromtimestamp(int(TickStore._to_ms(t) / 1000), tz=mktz(tz)).replace(tzinfo=mktz(tz)) == t
         # assert dt.fromtimestamp(int(TickStore._to_ms(t) / 1000)).replace(tzinfo=mktz(tz)) == t
@@ -133,8 +134,8 @@ def test_tickstore_to_bucket_with_image():
         assert get_coldata(bucket[COLUMNS]['A']) == ([124, 125], [1, 1, 0, 0, 0, 0, 0, 0])
         assert get_coldata(bucket[COLUMNS]['B']) == ([27.2], [0, 1, 0, 0, 0, 0, 0, 0])
         assert get_coldata(bucket[COLUMNS]['D']) == ([0], [1, 0, 0, 0, 0, 0, 0, 0])
-        index = [dt.fromtimestamp(int(i / 1000), tz=mktz(tz)) for i in
-                 list(np.cumsum(np.frombuffer(decompress(bucket[INDEX]), dtype='uint64')))]
+        index_ts = list(np.cumsum(np.frombuffer(decompress(bucket[INDEX]), dtype='uint64')))
+        index = [dt.fromtimestamp(int(i / 1000), tz=mktz(tz)) for i in index_ts               ]
         assert index == [i['index'] for i in data]
         assert bucket[COLUMNS]['A'][DTYPE] == 'int64'
         assert bucket[COLUMNS]['B'][DTYPE] == 'float64'
