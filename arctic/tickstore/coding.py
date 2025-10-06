@@ -3,14 +3,12 @@ import struct
 
 import numpy as np
 
-import pyximport  # cython
-
-
-pyximport.install(
-    setup_args={"include_dirs": np.get_include()},
-    reload_support=True,
-    language_level=3
-)
+#import pyximport  # cython
+#pyximport.install(
+#    setup_args={"include_dirs": np.get_include()},
+#    reload_support=True,
+#    language_level=3
+#)
 
 from .int_coding import varint_encode, varint_decode_unsigned
 

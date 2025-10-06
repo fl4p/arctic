@@ -59,7 +59,7 @@ class PyTest(TestCommand):
 
 
 extensions = [
-    Extension("int_coding", ["arctic/tickstore/int_coding.pyx"], include_dirs=[np.get_include()]),
+    Extension("arctic.tickstore.int_coding", ["arctic/tickstore/int_coding.pyx"], include_dirs=[np.get_include()]),
 ]
 
 setup(
@@ -77,6 +77,7 @@ setup(
     cmdclass={'test': PyTest},
     setup_requires=["numpy",
                     "setuptools-git",
+                    "Cython"
                    ],
     install_requires=["decorator",
                       "enum-compat",
@@ -88,7 +89,7 @@ setup(
                       "pytz",
                       "tzlocal",
                       "lz4",
-                      "cython", # tickstore.coding
+                     # "cython", # tickstore.coding
                      ],
     # Note: pytest >= 4.1.0 is not compatible with pytest-cov < 2.6.1.
     # deprecated
