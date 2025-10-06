@@ -82,6 +82,7 @@ setup(
                       "pytz",
                       "tzlocal",
                       "lz4",
+                      "cython", # tickstore.coding
                      ],
     # Note: pytest >= 4.1.0 is not compatible with pytest-cov < 2.6.1.
     # deprecated

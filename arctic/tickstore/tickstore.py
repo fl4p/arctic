@@ -11,6 +11,8 @@ from bson.binary import Binary
 from pymongo import ReadPreference
 from pymongo.errors import OperationFailure
 
+from .coding import nparray_varint_encode, nparray_varint_decode
+
 try:
     from pandas.core.frame import _arrays_to_mgr
 except ImportError:
@@ -93,6 +95,7 @@ GAIN = 'g'  # factor, (pre)scaler, gain,
 
 COUNT = 'c'
 VERSION = 'v'
+INDEX_PRECISION = 'p'
 
 META = 'md'
 
@@ -119,7 +122,7 @@ class TickStore(object):
 
         self._metadata.create_index([(SYMBOL, pymongo.ASCENDING)], background=True, unique=True)
 
-    def __init__(self, arctic_lib, chunk_size=100000):
+    def __init__(self, arctic_lib, chunk_size=100000, index_precision='ms'):
         """
         Parameters
         ----------
@@ -133,6 +136,8 @@ class TickStore(object):
         # Do we allow reading from secondaries
         self._allow_secondary = self._arctic_lib.arctic._allow_secondary
         self._chunk_size = chunk_size
+        assert index_precision in ('ms', 's')
+        self._index_precision = index_precision
         self._reset()
 
     @mongo_retry
@@ -424,7 +429,7 @@ class TickStore(object):
                 for i, arr in enumerate(v):
                     if arr is None:
                         #  Replace Nones with appropriate-length empty arrays
-                        v[i] = self._empty(len(index[i]), column_dtypes.get(k))
+                        v[i] = TickStore._empty(len(index[i]), column_dtypes.get(k))
                     else:
                         # Promote to appropriate dtype only if we can safely cast all the values
                         # This avoids the case with strings where None is cast as 'None'.
@@ -437,7 +442,8 @@ class TickStore(object):
             rtn[k] = v
         return rtn
 
-    def _set_or_promote_dtype(self, column_dtypes, c, dtype):
+    @staticmethod
+    def _set_or_promote_dtype(column_dtypes, c, dtype):
         existing_dtype = column_dtypes.get(c)
         if existing_dtype is None or existing_dtype != dtype:
             # Promote ints to floats - as we can't easily represent NaNs
@@ -458,7 +464,7 @@ class TickStore(object):
                 continue
             if field not in document or document[field] is None:
                 col_dtype = np.dtype(str if isinstance(image[field], str) else 'f8')
-                document[field] = self._empty(rtn_length, dtype=col_dtype)
+                document[field] = TickStore._empty(rtn_length, dtype=col_dtype)
                 column_dtypes[field] = col_dtype
                 column_set.add(field)
             val = image[field]
@@ -477,8 +483,19 @@ class TickStore(object):
         rtn = {}
         if doc[VERSION] != 3 and doc[VERSION] != CHUNK_VERSION_NUMBER_MAX:
             raise ArcticException("Unhandled document version: %s" % doc[VERSION])
+        #if doc.get(INDEX_PRECISION, 'ms') != self._index_precision:
+        #    raise ArcticException("Unexpected index precision: %s" % doc.get(INDEX_PRECISION, 'ms'))
         # np.cumsum copies the read-only array created with frombuffer
-        rtn[INDEX] = np.cumsum(np.frombuffer(lz4_decompress(doc[INDEX]), dtype='uint64'))
+        buf = lz4_decompress(doc[INDEX])
+        if doc[VERSION] == 4:
+            rtn[INDEX] = np.cumsum(nparray_varint_decode(buf))
+        else:
+            rtn[INDEX] = np.cumsum(np.frombuffer(buf, dtype='uint64'))
+        del buf
+
+        if doc.get(INDEX_PRECISION, 'ms') == 's':
+            rtn[INDEX] *= 1000
+
         doc_length = len(rtn[INDEX])
         column_set.update(doc[COLUMNS].keys())
 
@@ -511,8 +528,8 @@ class TickStore(object):
                     assert values.dtype == np.float16  # TODO
                     values = values.astype(np.float32) * coldata[GAIN]
                     dtype = np.float32
-                self._set_or_promote_dtype(column_dtypes, c, dtype)
-                rtn[c] = self._empty(rtn_length, dtype=column_dtypes[c])
+                TickStore._set_or_promote_dtype(column_dtypes, c, dtype)
+                rtn[c] = TickStore._empty(rtn_length, dtype=column_dtypes[c])
                 # unpackbits will make a copy of the read-only array created by frombuffer
                 rowmask = np.unpackbits(np.frombuffer(lz4_decompress(coldata[ROWMASK]),
                                                       dtype='uint8'))[:doc_length].astype('bool')
@@ -525,7 +542,8 @@ class TickStore(object):
             rtn = self._prepend_image(rtn, doc[IMAGE_DOC], rtn_length, column_dtypes, column_set, columns)
         return rtn
 
-    def _empty(self, length, dtype):
+    @staticmethod
+    def _empty(length, dtype):
         if dtype is not None and dtype == np.float64:
             rtn = np.empty(length, dtype)
             rtn[:] = np.nan
@@ -783,8 +801,14 @@ class TickStore(object):
         return rtn, final_image
 
     @staticmethod
-    def _to_bucket(ticks, symbol, initial_image, to_dtype=None):
-        rtn = {SYMBOL: symbol, VERSION: CHUNK_VERSION_NUMBER, COLUMNS: {}, COUNT: len(ticks)}
+    def _to_bucket(ticks, symbol, initial_image, index_precision='ms', varint_coding=False, to_dtype=None):
+        if index_precision != 'ms':
+            assert varint_coding
+        rtn = {SYMBOL: symbol,
+               VERSION: CHUNK_VERSION_NUMBER if index_precision == 'ms' and not varint_coding else CHUNK_VERSION_NUMBER + 1,
+               COLUMNS: {}, COUNT: len(ticks)}
+        if index_precision != 'ms':
+            rtn[INDEX_PRECISION] = index_precision
         data = {}
         rowmask = {}
         start = to_dt(ticks[0]['index'])
@@ -837,7 +861,10 @@ class TickStore(object):
             idx = np.floor_divide(idx + np.uint64(1_000_000-1), np.uint64(1_000_000))
         else:
             idx = np.concatenate(([data['index'][0]], np.diff(data['index'])))
-        rtn[INDEX] = Binary(lz4_compressHC(idx.tobytes()))
+        if index_precision == 's':
+            # idx = np.floor_divide(idx + np.uint64(1_000 - 1), np.uint64(1_000))
+            idx = -(-idx // 1000)  # ceiling int div (alternative)
+        rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if varint_coding else idx.tobytes()))
         return rtn, final_image
 
     def max_date(self, symbol):

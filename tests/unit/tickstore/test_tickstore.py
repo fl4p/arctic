@@ -1,4 +1,5 @@
-from datetime import datetime as dt
+import math
+from datetime import datetime as dt, tzinfo
 
 import numpy as np
 import pandas as pd
@@ -13,7 +14,7 @@ from arctic.date._daterange import DateRange
 from arctic.date._mktz import mktz
 from arctic.exceptions import UnorderedDataException
 from arctic.tickstore.tickstore import TickStore, IMAGE_DOC, IMAGE, START, \
-    DTYPE, END, COUNT, SYMBOL, COLUMNS, ROWMASK, DATA, INDEX, IMAGE_TIME
+    DTYPE, END, COUNT, SYMBOL, COLUMNS, ROWMASK, DATA, INDEX, IMAGE_TIME, VERSION, INDEX_PRECISION
 
 
 def test_mongo_date_range_query():
@@ -78,31 +79,71 @@ def test_tickstore_to_bucket_no_image():
     assert not final_image
 
 
-def test_tickstore_to_bucket_with_image():
+def test_tickstore_to_bucket_varint():
     symbol = 'SYM'
     tz = 'UTC'
-    initial_image = {'index': dt(2014, 1, 1, 0, 0, tzinfo=mktz(tz)), 'A': 123, 'B': 54.4, 'C': 'DESC'}
     data = [{'index': dt(2014, 1, 1, 0, 1, tzinfo=mktz(tz)), 'A': 124, 'D': 0},
-            {'index': dt(2014, 1, 1, 0, 2, tzinfo=mktz(tz)), 'A': 125, 'B': 27.2}]
-    bucket, final_image = TickStore._to_bucket(data, symbol, initial_image)
-    assert bucket[COUNT] == 2
-    assert bucket[END] == dt(2014, 1, 1, 0, 2, tzinfo=mktz(tz))
+            {'index': dt(2014, 1, 1, 0, 2, tzinfo=mktz(tz)), 'A': 125, 'B': 27.2},
+            {'index': dt(2014, 1, 1, 0, 4, tzinfo=mktz(tz)), 'A': 126, 'B': 24.2}
+            ]
+    bucket, final_image = TickStore._to_bucket(data, symbol, None, index_precision='s', varint_coding=True)
+    assert bucket[VERSION] == 4
+    assert bucket[INDEX_PRECISION] == 's'
+    assert bucket[COUNT] == 3
+    assert bucket[END] == dt(2014, 1, 1, 0, 4, tzinfo=mktz(tz))
     assert set(bucket[COLUMNS]) == set(('A', 'B', 'D'))
     assert set(bucket[COLUMNS]['A']) == set((ROWMASK, DTYPE, DATA))
-    assert get_coldata(bucket[COLUMNS]['A']) == ([124, 125], [1, 1, 0, 0, 0, 0, 0, 0])
-    assert get_coldata(bucket[COLUMNS]['B']) == ([27.2], [0, 1, 0, 0, 0, 0, 0, 0])
+    assert get_coldata(bucket[COLUMNS]['A']) == ([124, 125, 126], [1, 1, 1, 0, 0, 0, 0, 0])
+    assert get_coldata(bucket[COLUMNS]['B']) == ([27.2, 24.2], [0, 1, 1, 0, 0, 0, 0, 0])
     assert get_coldata(bucket[COLUMNS]['D']) == ([0], [1, 0, 0, 0, 0, 0, 0, 0])
-    index = [dt.fromtimestamp(int(i/1000)).replace(tzinfo=mktz(tz)) for i in
-             list(np.cumsum(np.frombuffer(decompress(bucket[INDEX]), dtype='uint64')))]
+    from arctic.tickstore.coding import nparray_varint_decode
+    index_ts = list(np.cumsum( nparray_varint_decode(decompress(bucket[INDEX]))))
+    index = [dt.fromtimestamp(int(i), tz=mktz(tz)) for i in
+             index_ts]
     assert index == [i['index'] for i in data]
     assert bucket[COLUMNS]['A'][DTYPE] == 'int64'
     assert bucket[COLUMNS]['B'][DTYPE] == 'float64'
     assert bucket[SYMBOL] == symbol
-    assert bucket[START] == initial_image['index']
-    assert bucket[IMAGE_DOC][IMAGE] == initial_image
-    assert bucket[IMAGE_DOC] == {IMAGE: initial_image,
-                                 IMAGE_TIME: initial_image['index']}
-    assert final_image == {'index': data[-1]['index'], 'A': 125, 'B': 27.2, 'C': 'DESC', 'D': 0}
+
+    cols = set()
+    column_dtypes = {}
+    rtb = TickStore._read_bucket(None, bucket, cols, column_dtypes, None, None, None)
+    assert np.all(rtb[INDEX] == [i*1000 for i  in index_ts ])
+    assert np.all(rtb['A'] == [124, 125, 126])
+    assert math.isnan(rtb['B'][0]) and np.all(rtb['B'][1:] == [27.2, 24.2])
+
+def test_tickstore_to_bucket_with_image():
+        symbol = 'SYM'
+        tz = 'UTC'
+        initial_image = {'index': dt(2014, 1, 1, 0, 0, tzinfo=mktz(tz)), 'A': 123, 'B': 54.4, 'C': 'DESC'}
+        data = [{'index': dt(2014, 1, 1, 0, 1, tzinfo=mktz(tz)), 'A': 124, 'D': 0},
+                {'index': dt(2014, 1, 1, 0, 2, tzinfo=mktz(tz)), 'A': 125, 'B': 27.2}]
+        t = data[0]['index']
+        import tzlocal
+        assert tzlocal.get_localzone().zone, "install tzlocal<=1.4"
+        assert int(TickStore._to_ms(t) / 1000) == 1388534460
+        assert dt.fromtimestamp(int(TickStore._to_ms(t) / 1000), tz=mktz(tz)) == t
+        assert dt.fromtimestamp(int(TickStore._to_ms(t) / 1000), tz=mktz(tz)).replace(tzinfo=mktz(tz)) == t
+        # assert dt.fromtimestamp(int(TickStore._to_ms(t) / 1000)).replace(tzinfo=mktz(tz)) == t
+        bucket, final_image = TickStore._to_bucket(data, symbol, initial_image)
+        assert bucket[COUNT] == 2
+        assert bucket[END] == dt(2014, 1, 1, 0, 2, tzinfo=mktz(tz))
+        assert set(bucket[COLUMNS]) == set(('A', 'B', 'D'))
+        assert set(bucket[COLUMNS]['A']) == set((ROWMASK, DTYPE, DATA))
+        assert get_coldata(bucket[COLUMNS]['A']) == ([124, 125], [1, 1, 0, 0, 0, 0, 0, 0])
+        assert get_coldata(bucket[COLUMNS]['B']) == ([27.2], [0, 1, 0, 0, 0, 0, 0, 0])
+        assert get_coldata(bucket[COLUMNS]['D']) == ([0], [1, 0, 0, 0, 0, 0, 0, 0])
+        index = [dt.fromtimestamp(int(i / 1000), tz=mktz(tz)) for i in
+                 list(np.cumsum(np.frombuffer(decompress(bucket[INDEX]), dtype='uint64')))]
+        assert index == [i['index'] for i in data]
+        assert bucket[COLUMNS]['A'][DTYPE] == 'int64'
+        assert bucket[COLUMNS]['B'][DTYPE] == 'float64'
+        assert bucket[SYMBOL] == symbol
+        assert bucket[START] == initial_image['index']
+        assert bucket[IMAGE_DOC][IMAGE] == initial_image
+        assert bucket[IMAGE_DOC] == {IMAGE: initial_image,
+                                     IMAGE_TIME: initial_image['index']}
+        assert final_image == {'index': data[-1]['index'], 'A': 125, 'B': 27.2, 'C': 'DESC', 'D': 0}
 
 
 def test_tickstore_to_bucket_always_forwards():
@@ -157,7 +198,7 @@ def test_tickstore_pandas_to_bucket_image():
     assert np.isnan(values[1])
     assert values[0] == 1 and values[2] == 1
     assert rowmask == [1, 1, 1, 0, 0, 0, 0, 0]
-    index = [dt.fromtimestamp(int(i/1000)).replace(tzinfo=mktz(tz)) for i in
+    index = [dt.fromtimestamp(int(i/1000), tz=mktz(tz)) for i in
              list(np.cumsum(np.frombuffer(decompress(bucket[INDEX]), dtype='uint64')))]
     assert index == tick_index
     assert bucket[COLUMNS]['A'][DTYPE] == 'int64'
