@@ -2,6 +2,7 @@ from __future__ import print_function
 
 import copy
 import logging
+from collections import defaultdict
 from datetime import datetime as dt, timedelta
 
 import numpy as np
@@ -660,6 +661,13 @@ class TickStore(object):
             sum(len(c["d"]) for b in buckets for c in b['cs'].values()),
             sum(len(c["m"]) for b in buckets for c in b['cs'].values()),
         )
+
+        self.last_write_bytes_per_col = defaultdict(int)
+        for b in buckets:
+            for cn, cd in b['cs'].items():
+                self.last_write_bytes_per_col[cn] += len(cd)
+            self.last_write_bytes_per_col['_i'] += len(b['i'])
+
         t = (dt.now() - start).total_seconds()
         ticks = len(buckets) * self._chunk_size
         rate = int(ticks / t) if t != 0 else float("nan")
