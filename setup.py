@@ -19,8 +19,10 @@
 import logging
 import sys
 
-from setuptools import find_packages
+import numpy as np
+from setuptools import find_packages, Extension
 from setuptools import setup
+from Cython.Build import cythonize
 from setuptools.command.test import test as TestCommand
 
 long_description_content_type='text/markdown'
@@ -55,6 +57,10 @@ class PyTest(TestCommand):
         errno = pytest.main(args)
         sys.exit(errno)
 
+
+extensions = [
+    Extension("int_coding", ["arctic/tickstore/int_coding.pyx"], include_dirs=[np.get_include()]),
+]
 
 setup(
     name="arctic",
@@ -122,4 +128,5 @@ setup(
         "Topic :: Database :: Front-Ends",
         "Topic :: Software Development :: Libraries",
     ],
+    ext_modules = cythonize(extensions)# try with  python setup.py build_ext --inplace
 )
