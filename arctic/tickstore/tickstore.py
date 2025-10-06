@@ -655,6 +655,12 @@ class TickStore(object):
 
     def _write(self, buckets):
         start = dt.now()
+        self.last_write_bytes_per_col = defaultdict(int)
+        for b in buckets:
+            for cn, cd in b['cs'].items():
+                self.last_write_bytes_per_col[cn] += len(cd['d']) + len(cd['m'])
+            self.last_write_bytes_per_col['_i'] += len(b['i'])
+
         mongo_retry(self._collection.insert_many)(buckets)
         self.last_write_bytes = (
             sum(len(b["i"]) for b in buckets),
@@ -662,11 +668,7 @@ class TickStore(object):
             sum(len(c["m"]) for b in buckets for c in b['cs'].values()),
         )
 
-        self.last_write_bytes_per_col = defaultdict(int)
-        for b in buckets:
-            for cn, cd in b['cs'].items():
-                self.last_write_bytes_per_col[cn] += len(cd)
-            self.last_write_bytes_per_col['_i'] += len(b['i'])
+
 
         t = (dt.now() - start).total_seconds()
         ticks = len(buckets) * self._chunk_size
