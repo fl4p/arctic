@@ -13,8 +13,8 @@ DEF VARINT_MAX_BITS =64
 
 
 @cython.boundscheck(False)
-def varint_encode(arr, write):
-    cdef np.ndarray[long] val = arr
+def varint_encode_unsigned(arr, write):
+    cdef np.ndarray[unsigned long] val = arr
     cdef Py_ssize_t i
     cdef int value, bits
     cdef cython.char[:] buf = np.zeros([BUF_SIZ], dtype=np.byte)

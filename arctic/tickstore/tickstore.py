@@ -858,14 +858,20 @@ class TickStore(object):
         rtn[END] = end
         rtn[START] = start
         if isinstance(data['index'][0], np.datetime64):
-            idx = np.concatenate(([data['index'][0].astype(np.uint64)], np.diff(data['index']).astype(np.uint64)))
+            idx = np.concatenate(([data['index'][0]], np.diff(data['index'])))
             # causal conversion ns -> ms
-            idx = np.floor_divide(idx + np.uint64(1_000_000-1), np.uint64(1_000_000))
+            if index_precision == 's':
+                s = 1_000_000_000
+            elif index_precision == 'ms':
+                s = 1_000_000
+            else:
+                raise ValueError(index_precision)
+            idx = np.floor_divide(idx + np.uint64(s-1), np.uint64(s)).astype(np.uint64)
         else:
             idx = np.concatenate(([data['index'][0]], np.diff(data['index'])))
-        if index_precision == 's':
-            # idx = np.floor_divide(idx + np.uint64(1_000 - 1), np.uint64(1_000))
-            idx = -(-idx // 1000)  # ceiling int div (alternative)
+            if index_precision == 's':
+                idx = np.floor_divide(idx + np.uint64(1_000 - 1), np.uint64(1_000)).astype(np.uint64)
+                 # idx = -(-idx // 1000)  # ceiling int div (alternative) TODO doesnt work with uint*
         rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if varint_coding else idx.tobytes()))
         return rtn, final_image
 

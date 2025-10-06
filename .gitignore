@@ -18,3 +18,5 @@ junit.xml
 *.sw[op]
 
 .DS_Store
+
+*.c

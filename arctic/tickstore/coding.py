@@ -3,23 +3,26 @@ import struct
 
 import numpy as np
 
-#import pyximport  # cython
-#pyximport.install(
+from .int_coding import varint_encode_unsigned, varint_decode_unsigned
+
+
+# import pyximport  # cython
+# pyximport.install(
 #    setup_args={"include_dirs": np.get_include()},
 #    reload_support=True,
-#    language_level=3
-#)
+#    language_level=3)
 
-from .int_coding import varint_encode, varint_decode_unsigned
 
-def nparray_varint_encode(arr:np.array):
+def nparray_varint_encode(arr: np.array):
     iob = io.BytesIO()
-    varint_encode(arr, iob.write)
+    varint_encode_unsigned(arr, iob.write)
     iob.seek(0)
     return iob.read(-1)
 
+
 def nparray_varint_decode(buf):
     return varint_decode_unsigned(buf, (1 << 64) - 1, int)
+
 
 VARINT_MAX_BITS = 64
 
@@ -59,6 +62,7 @@ def _VarintEncoder(signed=True):
         return write(pack_int2byte(bits))
 
     return EncodeSignedVarint
+
 
 def _UnsignedVarintEncoder(signed=True):
     pack_int2byte = struct.Struct('>B').pack
