@@ -39,17 +39,17 @@ def numpy_fill(arr):
     return df.values
 
 
-def log_q16_10(x, loss=10):
-    f = np.round(np.log10(x * (2 ** 16) + 1) * (2 ** 16 / loss))
+def log_q16(x, loss=10, prescale=16):
+    f = np.round(np.log10(x * (2 ** prescale) + 1) * (2 ** 16 / loss))
     return numpy_fill(f).astype('int')
 
 
-def exp_q16_10(x, loss=10):
-    return (np.power(10, (x / (2 ** 16 / loss))) - 1) / (2 ** 16)
+def exp_q16(x, loss=10, prescale=16):
+    return (np.power(10, (x / (2 ** 16 / loss))) - 1) / (2 ** prescale)
 
 
-def encode_logQ16_10_dzv(arr, delta_order=1):
-    i = log_q16_10(arr)
+def encode_logQ16_10_dzv(arr, delta_order=1, prescale=16):
+    i = log_q16(arr, prescale=prescale)
     for _ in range(delta_order):
         i = np.diff(i, prepend=0)
     zigzag_encode_inplace(i)
@@ -59,11 +59,11 @@ def encode_logQ16_10_dzv(arr, delta_order=1):
     return buf
 
 
-def decode_logQ16_10_dzv(buf: bytes, delta_order=1):
+def decode_logQ16_10_dzv(buf: bytes, delta_order=1, prescale=16):
     buf = lz4_decompress(buf)
     i = nparray_varint_decode(buf)
     zigzag_decode_inplace(i)
     for _ in range(delta_order):
         i = np.cumsum(i)
-    f = exp_q16_10(i)
+    f = exp_q16(i, prescale=prescale)
     return f

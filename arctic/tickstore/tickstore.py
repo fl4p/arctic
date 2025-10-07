@@ -12,7 +12,7 @@ from bson.binary import Binary
 from pymongo import ReadPreference
 from pymongo.errors import OperationFailure
 
-from .coding import nparray_varint_encode, nparray_varint_decode
+from .coding import nparray_varint_encode, nparray_varint_decode, encode_logQ16_10_dzv, decode_logQ16_10_dzv
 
 try:
     from pandas.core.frame import _arrays_to_mgr
@@ -90,6 +90,7 @@ IMAGE = 'i'
 COLUMNS = 'cs'
 DATA = 'd'
 DTYPE = 't'
+CODEC = 'c'
 IMAGE_TIME = 't'
 ROWMASK = 'm'
 GAIN = 'g'  # factor, (pre)scaler, gain,
@@ -314,6 +315,7 @@ class TickStore(object):
         if columns:
             projection = dict([(SYMBOL, 1),
                                (INDEX, 1),
+                               (INDEX_PRECISION, 1),
                                (START, 1),
                                (VERSION, 1),
                                (IMAGE_DOC, 1)] +
@@ -322,6 +324,7 @@ class TickStore(object):
         else:
             projection = dict([(SYMBOL, 1),
                                (INDEX, 1),
+                               (INDEX_PRECISION, 1),
                                (START, 1),
                                (VERSION, 1),
                                (COLUMNS, 1),
@@ -521,10 +524,21 @@ class TickStore(object):
         for c in column_set:
             try:
                 coldata = doc[COLUMNS][c]
+                codec = coldata.get(CODEC)
                 dtype = np.dtype(coldata[DTYPE])
                 # values ends up being copied by pandas before being returned to the user. However, we
                 # copy it into a bytearray here for safety.
-                values = np.frombuffer(bytearray(lz4_decompress(coldata[DATA])), dtype=dtype)
+                if codec:
+                    if codec == 'logQ16_10_dzv':
+                        values = decode_logQ16_10_dzv(coldata[DATA])
+                    elif codec == 'log28Q16_10_dzv':
+                        values = decode_logQ16_10_dzv(coldata[DATA], prescale=28)
+                    else:
+                        raise ArcticException("Unhandled codec: %s" % codec)
+                    if values.dtype != dtype:
+                        values = values.astype(dtype)
+                else:
+                    values = np.frombuffer(bytearray(lz4_decompress(coldata[DATA])), dtype=dtype)
                 if GAIN in coldata:
                     assert values.dtype == np.float16  # TODO
                     values = values.astype(np.float32) * coldata[GAIN]
@@ -610,7 +624,7 @@ class TickStore(object):
                     "Document already exists with start:{} end:{} in the range of our start:{} end:{}".format(
                         doc[START], doc[END], start, end))
 
-    def write(self, symbol, data, initial_image=None, metadata=None, to_dtype=None):
+    def write(self, symbol, data, initial_image=None, metadata=None, to_dtype=None, codec=None):
         """
         Writes a list of market data events.
 
@@ -643,9 +657,11 @@ class TickStore(object):
         self._assert_nonoverlapping_data(symbol, to_dt(start), to_dt(end))
 
         if pandas:
+            assert codec is None
+            assert self._index_precision is None or self._index_precision == 'ms'
             buckets = self._pandas_to_buckets(data, symbol, initial_image, to_dtype=to_dtype)
         else:
-            buckets = self._to_buckets(data, symbol, initial_image, to_dtype=to_dtype)
+            buckets = self._to_buckets(data, symbol, initial_image, to_dtype=to_dtype, codec=codec)
         self._write(buckets)
 
         if metadata:
@@ -683,12 +699,12 @@ class TickStore(object):
             rtn.append(bucket)
         return rtn
 
-    def _to_buckets(self, x, symbol, initial_image, to_dtype=None):
+    def _to_buckets(self, x, symbol, initial_image, to_dtype=None, codec=None):
         rtn = []
         for i in range(0, len(x), self._chunk_size):
             bucket, initial_image = TickStore._to_bucket(x[i:i + self._chunk_size], symbol, initial_image,
                                                          index_precision=self._index_precision,
-                                                         to_dtype=to_dtype)
+                                                         to_dtype=to_dtype, codec=codec)
             rtn.append(bucket)
         return rtn
 
@@ -812,7 +828,7 @@ class TickStore(object):
         return rtn, final_image
 
     @staticmethod
-    def _to_bucket(ticks, symbol, initial_image, index_precision='ms', varint_coding=None, to_dtype=None):
+    def _to_bucket(ticks, symbol, initial_image, index_precision='ms', varint_coding=None, to_dtype=None, codec=None):
         if index_precision != 'ms':
             assert varint_coding is None or varint_coding == True
             varint_coding = True
@@ -851,9 +867,36 @@ class TickStore(object):
             if k != 'index':
                 v = np.array(v)
                 v, gain = TickStore._ensure_supported_dtypes(v, to_dtype=to_dtype)
-                rtn[COLUMNS][k] = {DATA: Binary(lz4_compressHC(v.tobytes())),
+                enc = None
+                if codec:
+                    if codec == 'logQ16_10_dzv':
+                        enc = encode_logQ16_10_dzv(v)
+                        code_err = np.nanmax(np.abs(decode_logQ16_10_dzv(enc) - v) / v)
+                        # print('code_err=', code_err)
+                        assert code_err < 250e-6, (round(code_err, 6), symbol,k, start, end)
+                    elif codec == 'log28Q16_10_dzv':
+                        enc = encode_logQ16_10_dzv(v, prescale=28)
+                        code_err = np.nanmax(np.abs(decode_logQ16_10_dzv(enc, prescale=28) - v) / v)
+                        #print('code_err=', code_err)
+                        assert code_err < 250e-6, (round(code_err, 6), symbol,k, start, end)
+                    else:
+                        raise ValueError("Unsupported codec: %s" % codec)
+
+                buf2 = lz4_compressHC(v.tobytes()) #this is pretty fast, so just try if we are better
+                if not codec or len(buf2) < len(enc):
+                    enc = buf2
+                    codec_sel = None
+                    # print('encoded size is bigger than raw!', len(buf2), len(enc))
+                else:
+                    codec_sel = codec
+                del buf2
+
+                rtn[COLUMNS][k] = {DATA: Binary(enc),
                                    DTYPE: TickStore._str_dtype(v.dtype),
                                    ROWMASK: rowmask[k]}
+                if codec_sel:
+                    rtn[COLUMNS][k][CODEC] = codec_sel
+
                 if gain:
                     rtn[COLUMNS][k][GAIN] = gain
                     rtn[VERSION] = max(rtn[VERSION], CHUNK_VERSION_NUMBER_MAX)
@@ -878,7 +921,7 @@ class TickStore(object):
                 raise ValueError(index_precision)
             idx = np.floor_divide(idx + np.uint64(s-1), np.uint64(s))
         else:
-            idx = np.concatenate(([data['index'][0]], np.diff(data['index'])))
+            idx = np.concatenate(([data['index'][0].astype(np.uint64)], np.diff(data['index']).astype(np.uint64)))
             if index_precision == 's':
                 idx = np.floor_divide(idx + np.uint64(1_000 - 1), np.uint64(1_000))
                  # idx = -(-idx // 1000)  # ceiling int div (alternative) TODO doesnt work with uint*
