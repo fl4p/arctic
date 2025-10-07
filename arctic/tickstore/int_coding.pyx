@@ -11,6 +11,23 @@ cimport numpy as cnp
 DEF  BUF_SIZ = 256*8
 DEF VARINT_MAX_BITS =64
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def zigzag_encode_inplace(arr):
+    cdef long[:] buf = arr
+    cdef Py_ssize_t i = 0
+    for i in range(0, len(arr)):
+        buf[i] = buf[i] << 1  if buf[i] >= 0 else (buf[i] << 1) ^ (~0)
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def zigzag_decode_inplace(arr):
+    cdef long[:] buf = arr
+    cdef Py_ssize_t i = 0
+    for i in range(0, len(arr)):
+        buf[i] = buf[i] >> 1  if not buf[i] & 0x1 else (buf[i] >> 1) ^ (~0)
+
 
 @cython.boundscheck(False)
 def varint_encode_unsigned(arr, write):
@@ -40,9 +57,9 @@ def varint_encode_unsigned(arr, write):
     if pos > 0:
         write(buf[:pos]) # memoryview, no-copy!
 
-
 @cython.boundscheck(False)
-def varint_decode_unsigned(buffer, mask, result_type):
+@cython.wraparound(False)
+def varint_decode_unsigned(buffer, mask):
     cdef const unsigned char[:] buf = buffer
     cdef Py_ssize_t bufLen = len(buffer)
 
@@ -50,8 +67,9 @@ def varint_decode_unsigned(buffer, mask, result_type):
     cdef unsigned char b, shift
     cdef Py_ssize_t pos = 0, resPos = 0
 
-    arr = np.zeros([bufLen], dtype=np.uint64)
-    cdef unsigned long[:] res = arr
+    # here we use signed long as output so we can apply zigzag in-place later
+    arr = np.zeros([bufLen], dtype=np.int64)
+    cdef long[:] res = arr
 
     while pos < bufLen:
         result = 0
