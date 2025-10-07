@@ -868,7 +868,7 @@ class TickStore(object):
         rtn[END] = end
         rtn[START] = start
         if isinstance(data['index'][0], np.datetime64):
-            idx = np.concatenate(([data['index'][0]], np.diff(data['index'])))
+            idx = np.concatenate(([data['index'][0].astype(np.uint64)], np.diff(data['index']).astype(np.uint64)))
             # causal conversion ns -> ms
             if index_precision == 's':
                 s = 1_000_000_000
