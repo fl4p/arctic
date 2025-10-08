@@ -41,7 +41,7 @@ def numpy_fill(arr):
 
 def log_q16(x, loss=10, prescale=16):
     f = np.round(np.log10(x * (2 ** prescale) + 1) * (2 ** 16 / loss))
-    return numpy_fill(f).astype('int')
+    return (f).astype('int')
 
 
 def exp_q16(x, loss=10, prescale=16):

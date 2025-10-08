@@ -876,7 +876,7 @@ class TickStore(object):
                         assert code_err < 250e-6, (round(code_err, 6), symbol,k, start, end)
                     elif codec == 'log28Q16_10_dzv':
                         enc = encode_logQ16_10_dzv(v, prescale=28)
-                        code_err = np.nanmax(np.abs(decode_logQ16_10_dzv(enc, prescale=28) - v) / v)
+                        code_err = np.nanmax(np.abs(decode_logQ16_10_dzv(enc, prescale=28) - v) / (v+1e-8))
                         #print('code_err=', code_err)
                         assert code_err < 250e-6, (round(code_err, 6), symbol,k, start, end)
                     else:
