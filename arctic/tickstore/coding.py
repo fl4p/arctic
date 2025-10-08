@@ -1,4 +1,5 @@
 import io
+import zlib
 
 import numpy as np
 import pandas as pd
@@ -39,31 +40,31 @@ def numpy_fill(arr):
     return df.values
 
 
-def log_q16(x, loss=10, prescale=16):
-    f = np.round(np.log10(x * (2 ** prescale) + 1) * (2 ** 16 / loss))
+def log_q16(x, loss=10, prescale=16, preadd=1):
+    f = np.round(np.log10(x * (2 ** prescale) + preadd) * (2 ** 16 / loss))
     return (f).astype('int')
 
 
-def exp_q16(x, loss=10, prescale=16):
-    return (np.power(10, (x / (2 ** 16 / loss))) - 1) / (2 ** prescale)
+def exp_q16(x, loss=10, prescale=16, preadd=1):
+    return (np.power(10, (x / (2 ** 16 / loss))) - preadd) / (2 ** prescale)
 
 
-def encode_logQ16_10_dzv(arr, delta_order=1, prescale=16):
-    i = log_q16(arr, prescale=prescale)
+def encode_logQ16_10_dzv(arr, delta_order=1, prescale=16, preadd=1, comp='lz4'):
+    i = log_q16(arr, prescale=prescale, preadd=preadd)
     for _ in range(delta_order):
         i = np.diff(i, prepend=0)
     zigzag_encode_inplace(i)
     assert i.min() >= 0
     buf = nparray_varint_encode(i.astype(np.uint64))
-    buf = lz4_compressHC(buf)
+    buf = lz4_compressHC(buf) if comp == 'lz4' else zlib.compress(buf)
     return buf
 
 
-def decode_logQ16_10_dzv(buf: bytes, delta_order=1, prescale=16):
-    buf = lz4_decompress(buf)
+def decode_logQ16_10_dzv(buf: bytes, delta_order=1, prescale=16, preadd=1, comp='lz4'):
+    buf = lz4_decompress(buf) if comp == 'lz4' else zlib.decompress(buf)
     i = nparray_varint_decode(buf)
     zigzag_decode_inplace(i)
     for _ in range(delta_order):
         i = np.cumsum(i)
-    f = exp_q16(i, prescale=prescale)
+    f = exp_q16(i, prescale=prescale, preadd=preadd)
     return f

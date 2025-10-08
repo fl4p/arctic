@@ -533,6 +533,8 @@ class TickStore(object):
                         values = decode_logQ16_10_dzv(coldata[DATA])
                     elif codec == 'log28Q16_10_dzv':
                         values = decode_logQ16_10_dzv(coldata[DATA], prescale=28)
+                    elif codec == 'loq16_10_dzv1':
+                        values = decode_logQ16_10_dzv(coldata[DATA], prescale=24, preadd=.001, comp='zlib')
                     else:
                         raise ArcticException("Unhandled codec: %s" % codec)
                     if values.dtype != dtype:
@@ -869,16 +871,12 @@ class TickStore(object):
                 v, gain = TickStore._ensure_supported_dtypes(v, to_dtype=to_dtype)
                 enc = None
                 if codec:
-                    if codec == 'logQ16_10_dzv':
-                        enc = encode_logQ16_10_dzv(v)
-                        code_err = np.nanmax(np.abs(decode_logQ16_10_dzv(enc) - v) / v)
-                        # print('code_err=', code_err)
-                        assert code_err < 250e-6, (round(code_err, 6), symbol,k, start, end)
-                    elif codec == 'log28Q16_10_dzv':
-                        enc = encode_logQ16_10_dzv(v, prescale=28)
-                        code_err = np.nanmax(np.abs(decode_logQ16_10_dzv(enc, prescale=28) - v) / (v+1e-8))
-                        #print('code_err=', code_err)
-                        assert code_err < 250e-6, (round(code_err, 6), symbol,k, start, end)
+                    if codec == 'logQ16_10_dzv' or codec == 'log28Q16_10_dzv':
+                        raise ArcticException("deprecated codec")
+                    elif codec == 'loq16_10_dzv1':
+                        enc = encode_logQ16_10_dzv(v, prescale=24, preadd=.001, comp='zlib')
+                        code_err = np.nanmax(abs(decode_logQ16_10_dzv(enc, prescale=24, preadd=.001, comp='zlib') - v) / (v + 1e-10))
+                        assert code_err < 250e-6, (round(code_err, 6), symbol, k, start, end)
                     else:
                         raise ValueError("Unsupported codec: %s" % codec)
 
