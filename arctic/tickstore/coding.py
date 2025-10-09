@@ -140,7 +140,7 @@ class LnQ16_VQL():
         for _ in range(self.delta_order):
             i = np.diff(i, prepend=np.int64(0))
         zigzag_encode_inplace(i)
-        assert i.min() >= 0, i.min()
+        assert i.min() >= 0, (np.argmin(i), i.min(), arr[np.argmin(i)-1:np.argmin(i)+1])
         buf = nparray_varint_encode(i.astype(np.uint64))
         buf = lz4_compressHC(buf) if self.comp == 'lz4' else zlib.compress(buf)  # using lz4 here for fast retrieval
 
