@@ -175,6 +175,7 @@ class TickStore(object):
         self._chunk_size = chunk_size
         assert index_precision in ('ms', 's')
         self._index_precision = index_precision
+        self._verify_codec = True
         self._reset()
 
     @mongo_retry
@@ -573,7 +574,7 @@ class TickStore(object):
                     else:
                         coder = codec_registry.get(codec)
                         if coder is None:
-                            raise ArcticException("Unhandled codec: %s" % codec)
+                            raise ArcticException("unknown codec: %s" % codec)
                         values = coder.decode(coldata[DATA])
                     if values.dtype != dtype:
                         values = values.astype(dtype)
@@ -736,7 +737,7 @@ class TickStore(object):
         for i in range(0, len(x), self._chunk_size):
             bucket, initial_image = TickStore._to_bucket_pandas(x.iloc[i:i + self._chunk_size], symbol, initial_image,
                                                                 index_precision=self._index_precision,
-                                                                to_dtype=to_dtype, codec=codec)
+                                                                to_dtype=to_dtype, codec=codec, verify_codec=self._verify_codec)
             rtn.append(bucket)
         return rtn
 
@@ -745,7 +746,7 @@ class TickStore(object):
         for i in range(0, len(x), self._chunk_size):
             bucket, initial_image = TickStore._to_bucket(x[i:i + self._chunk_size], symbol, initial_image,
                                                          index_precision=self._index_precision,
-                                                         to_dtype=to_dtype, codec=codec)
+                                                         to_dtype=to_dtype, codec=codec, verify_codec=self._verify_codec)
             rtn.append(bucket)
         return rtn
 
@@ -869,7 +870,7 @@ class TickStore(object):
         return rtn, final_image
 
     @staticmethod
-    def _encode(v, col_name, to_dtype, codec, dbg_ctx):
+    def _encode(v, col_name, to_dtype, codec, verify, dbg_ctx):
         v, gain = TickStore._ensure_supported_dtypes(v, to_dtype=to_dtype)
         enc = None
         codec_sel = None
@@ -880,9 +881,10 @@ class TickStore(object):
                 # raise ArcticException("deprecated codec")
                 # todo this one is too slow!
                 enc = encode_logQ16_10_dzv(v, prescale=24, preadd=.001, comp='zlib')
-                code_err = np.nanmax(
-                    abs(decode_logQ16_10_dzv(enc, prescale=24, preadd=.001, comp='zlib') - v) / (v + 1e-10))
-                assert code_err < 250e-6, (round(code_err, 6), dbg_ctx)
+                if verify:
+                    code_err = np.nanmax(
+                        abs(decode_logQ16_10_dzv(enc, prescale=24, preadd=.001, comp='zlib') - v) / (v + 1e-10))
+                    assert code_err < 250e-6, (round(code_err, 6), dbg_ctx)
                 codec_sel = codec
             else:
                 # todo select codec based on column name
@@ -896,14 +898,16 @@ class TickStore(object):
                     except Exception as e:
                         print('error coding', codec_sel, dbg_ctx)
                         raise
-                    code_err = np.nanmax(abs(coder.decode(enc) - v) / (abs(v) + coder.rtol_reg))
-                    assert code_err < coder.rtol_max, (round(code_err, 6), dbg_ctx)
+                    if verify:
+                        code_err = np.nanmax(abs(coder.decode(enc) - v) / (abs(v) + coder.rtol_reg))
+                        assert code_err < coder.rtol_max, (round(code_err, 6), dbg_ctx)
 
-        buf2 = lz4_compressHC(v.tobytes())  # this is pretty fast, so just try if we are better
-        if not codec_sel or len(buf2) < len(enc):
-            enc = buf2
-            codec_sel = None
-        del buf2
+        if verify:
+            buf2 = lz4_compressHC(v.tobytes())  # this is pretty fast, so just try if we are better
+            if not codec_sel or len(buf2) < len(enc):
+                enc = buf2
+                codec_sel = None
+            del buf2
 
         return enc, codec_sel, gain
 
@@ -945,7 +949,7 @@ class TickStore(object):
         return rtn, index_vlq
 
     @staticmethod
-    def _to_bucket(ticks, symbol, initial_image, index_precision='ms', to_dtype=None, codec=None):
+    def _to_bucket(ticks, symbol, initial_image, index_precision='ms', to_dtype=None, codec=None, verify_codec=True):
         rtn, index_vlq = TickStore._bucket_head(ticks, symbol, initial_image, index_precision, codec)
         tr = [to_dt(ticks[0]['index']), to_dt(ticks[-1]['index'])]
 
@@ -977,7 +981,7 @@ class TickStore(object):
         for k, v in data.items():
             if k != 'index':
                 v = np.array(v)
-                enc, codec_sel, gain = TickStore._encode(v, k, to_dtype, codec, dbg_ctx=(symbol, k, tr))
+                enc, codec_sel, gain = TickStore._encode(v, k, to_dtype, codec, verify_codec, dbg_ctx=(symbol, k, tr))
 
                 rtn[COLUMNS][k] = {DATA: Binary(enc),
                                    DTYPE: TickStore._str_dtype(v.dtype),
@@ -1010,7 +1014,7 @@ class TickStore(object):
         return rtn, final_image
 
     @staticmethod
-    def _to_bucket_pandas(df, symbol, initial_image, index_precision='ms', to_dtype=None, codec=None):
+    def _to_bucket_pandas(df, symbol, initial_image, index_precision='ms', to_dtype=None, codec=None, verify_codec=True):
         rtn, index_vlq = TickStore._bucket_head(df, symbol, initial_image, index_precision, codec)
         tr = [to_dt(df.index[0]), to_dt(df.index[-1])]
 
@@ -1028,7 +1032,7 @@ class TickStore(object):
             if len(val) == 0:
                 continue
 
-            enc, codec_sel, gain = TickStore._encode(val, k, to_dtype, codec, dbg_ctx=(symbol, k, tr))
+            enc, codec_sel, gain = TickStore._encode(val, k, to_dtype, codec, verify_codec, dbg_ctx=(symbol, k, tr))
             rtn[COLUMNS][k] = {DATA: Binary(enc),
                                DTYPE: TickStore._str_dtype(val.dtype),
                                ROWMASK: Binary(lz4_compressHC(np.packbits(rm).tobytes()))}
