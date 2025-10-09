@@ -51,3 +51,31 @@ def test_varint_unsigned():
     buf = nparray_varint_encode(i)
     dec = nparray_varint_decode(buf)
     assert np.all(i == dec)
+
+
+def test_LnQ25VQLgz():
+    #a = np.array([1.5824204e+28, 2.4443570e+27], dtype=np.float32)
+    a = np.array([2.2e+27, 1e-12,  1.4563e-12, 1e-13, 1.1e-14], dtype=np.float32)
+    from arctic.tickstore.tickstore import codec_registry
+    code = codec_registry['LnQ25VQLgz']
+    b = code.encode(a)
+    d = code.decode(b)
+    rtol = max(abs(d - a) / abs(a))
+    assert rtol < code.rtol_max
+
+    from arctic.tickstore.coding import LnQ16_VQL
+    code2 = LnQ16_VQL(loq_loss=25, comp='zlib', log_prescale=28)
+    a = np.array([1.2e+30, 1e-12], dtype=np.float32)
+    b = code2.encode(a)
+    d = code2.decode(b)
+    rtol = max(abs(d - a) / abs(a))
+    assert rtol < code2.rtol_max, rtol
+
+
+    from arctic.tickstore.coding import LnQ16_VQL
+    code2 = LnQ16_VQL(loq_loss=25, comp='zlib', log_prescale=24, loq_preadd=1e-8)
+    a = np.array([2e+31, 1e-15, 1e-10, 0.00453, 1234.54], dtype=np.float32)
+    b = code2.encode(a)
+    d = code2.decode(b)
+    rtol = max(abs(d - a) / abs(a))
+    assert rtol < code2.rtol_max, rtol

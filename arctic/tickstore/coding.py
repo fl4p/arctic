@@ -1,4 +1,5 @@
 import io
+import math
 import zlib
 
 import numpy as np
@@ -74,9 +75,10 @@ LOQ_PREADD = .0001
 
 
 def ln_q16(x, loss=15, prescale=LOQ_PRESCALE, preadd=LOQ_PREADD):
-    assert x.dtype == np.float32
-    f = np.round(np.log(x * np.float32(2 ** prescale) + np.float32(preadd)) * np.float32(2 ** 16 / loss))
-    assert f.dtype == np.float32
+    ft = np.float32
+    assert x.dtype == ft
+    f = np.round(np.log(x * ft(2 ** prescale) + ft(preadd)) * ft(2 ** 16 / loss))
+    assert f.dtype == ft
     return f
 
 
@@ -99,12 +101,23 @@ class LnQ16_VQL():
         # of lz4 as compared to zlib does not matter
     """
 
-    def __init__(self, comp = 'lz4', loq_loss=25):
+    def __init__(self, comp='lz4', loq_loss=25, log_prescale=37,loq_preadd=.0001):
+        """
+
+        Parameters
+        ----------
+        comp
+        loq_loss how much loss TODO
+        log_prescale: tune the dynamic range to avoid arithmetic overflow when using float32 math.
+                        set this to the highest number so that the code doesn't overflow.
+        loq_preadd : tune the precision for small numbers. decrease to increase precision.
+                    TODO why?
+        """
         self._signed = False
         self.delta_order = 1
         self.loq_loss = loq_loss
-        self.loq_prescale = 37  # 2**-37 => 1e-12, generally good
-        self.loq_preadd = .0001
+        self.loq_prescale = log_prescale  # 2**-37 => 1e-12, generally good, overflow at 2.2e+27
+        self.loq_preadd =loq_preadd
 
         assert comp in {'lz4', 'zlib'}
         self.comp = comp
@@ -117,8 +130,9 @@ class LnQ16_VQL():
         # loq+diff+vql
         signed = self._signed
         if not signed:
-            assert arr.min() >= 0
+            assert arr.min() >= 0, arr.min()
         i = ln_q16(np.abs(arr) if signed else arr, self.loq_loss, prescale=self.loq_prescale, preadd=self.loq_preadd)
+        assert math.isfinite(i.max()), ("code overflow", arr[np.argmax(i)])
         if signed:
             assert i.min() >= 0, (i.min())
             i *= np.sign(arr)
@@ -147,6 +161,7 @@ class LnQ16_15_VQL_lz4(LnQ16_VQL):
     def __init__(self):
         super().__init__(comp='lz4', loq_loss=15)
 
+
 class LnQ16_15_VQL_zlib(LnQ16_VQL):
     def __init__(self):
         super().__init__(comp='zlib', loq_loss=15)
@@ -170,7 +185,9 @@ class LnQ16_zlib:
 
     def encode(self, arr):
         i = ln_q16(np.abs(arr), self.loq_loss, self.loq_prescale, preadd=self.loq_preadd)
-        assert i.min() >= 0
+        if i.min() < 0:
+            imin = np.argmin(i)
+            raise ValueError('input[%s] %s maps to %s<0!' % (imin, arr[imin], i[imin]))
         i *= np.sign(arr)
         buf = i.astype(np.int32).tobytes()
         buf = zlib.compress(buf)
