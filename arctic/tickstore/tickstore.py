@@ -12,7 +12,8 @@ from bson.binary import Binary
 from pymongo import ReadPreference
 from pymongo.errors import OperationFailure
 
-from .coding import nparray_varint_encode, nparray_varint_decode, encode_logQ16_10_dzv, decode_logQ16_10_dzv
+from .coding import nparray_varint_encode, nparray_varint_decode, encode_logQ16_10_dzv, decode_logQ16_10_dzv, \
+    LnQ16_15_VQL_lz4, LnQ16_VQL, LnQ16_zlib
 
 try:
     from pandas.core.frame import _arrays_to_mgr
@@ -107,6 +108,22 @@ CHUNK_VERSION_NUMBER_MAX = 4
 
 # version.parse(pandas.__version__) > version.parse('1.0')
 # IS_PANDAS_1x = version.parse(pandas.__version__) > version.parse('1.0')
+
+
+codec_registry = {}
+
+def register_codec(name, obj):
+    assert hasattr(obj, 'encode') and callable(obj.encode)
+    assert hasattr(obj, 'decode') and callable(obj.decode)
+    assert hasattr(obj, 'rtol_max') and 0 <= obj.rtol_max <= 0.05
+    assert hasattr(obj, 'rtol_reg') and 0 <= obj.rtol_reg <= 0.0005
+    assert name not in codec_registry
+    assert len(name) < 16
+    codec_registry[name] = obj
+
+register_codec('LnQ25VQLgz', LnQ16_VQL(loq_loss=25, comp='zlib')) # for l2 data, general purpose
+register_codec('LnQ15VQLlz4', LnQ16_VQL(loq_loss=15, comp='lz4')) # for price data, fast
+register_codec('LnQ15gz', LnQ16_zlib(loq_loss=15)) # for signed trade qty, no VQL (no auto-corr)
 
 
 class TickStore(object):
@@ -536,7 +553,10 @@ class TickStore(object):
                     elif codec == 'loq16_10_dzv1':
                         values = decode_logQ16_10_dzv(coldata[DATA], prescale=24, preadd=.001, comp='zlib')
                     else:
-                        raise ArcticException("Unhandled codec: %s" % codec)
+                        coder = codec_registry.get(codec)
+                        if coder is None:
+                            raise ArcticException("Unhandled codec: %s" % codec)
+                        values = coder.decode(coldata[DATA])
                     if values.dtype != dtype:
                         values = values.astype(dtype)
                 else:
@@ -831,11 +851,16 @@ class TickStore(object):
 
     @staticmethod
     def _to_bucket(ticks, symbol, initial_image, index_precision='ms', varint_coding=None, to_dtype=None, codec=None):
-        if index_precision != 'ms':
+        if index_precision is None:
+            index_precision = 'ms'
+        if index_precision != 'ms' or codec:
             assert varint_coding is None or varint_coding == True
             varint_coding = True
+        else:
+            if varint_coding is None:
+                varint_coding = True
         rtn = {SYMBOL: symbol,
-               VERSION: CHUNK_VERSION_NUMBER if index_precision == 'ms' and not varint_coding else CHUNK_VERSION_NUMBER + 1,
+               VERSION: CHUNK_VERSION_NUMBER if index_precision == 'ms' and not varint_coding and not codec else CHUNK_VERSION_NUMBER + 1,
                COLUMNS: {}, COUNT: len(ticks)}
         if index_precision != 'ms':
             rtn[INDEX_PRECISION] = index_precision
@@ -870,23 +895,36 @@ class TickStore(object):
                 v = np.array(v)
                 v, gain = TickStore._ensure_supported_dtypes(v, to_dtype=to_dtype)
                 enc = None
+                codec_sel = None
                 if codec:
                     if codec == 'logQ16_10_dzv' or codec == 'log28Q16_10_dzv':
                         raise ArcticException("deprecated codec")
                     elif codec == 'loq16_10_dzv1':
+                        # raise ArcticException("deprecated codec")
+                        # todo this one is too slow!
                         enc = encode_logQ16_10_dzv(v, prescale=24, preadd=.001, comp='zlib')
                         code_err = np.nanmax(abs(decode_logQ16_10_dzv(enc, prescale=24, preadd=.001, comp='zlib') - v) / (v + 1e-10))
                         assert code_err < 250e-6, (round(code_err, 6), symbol, k, start, end)
+                        codec_sel = codec
                     else:
-                        raise ValueError("Unsupported codec: %s" % codec)
+                        # todo select codec based on column name
+                        codec_sel = codec[k] if isinstance(codec, dict) else codec
+                        if codec_sel is not None:
+                            coder = codec_registry.get(codec_sel)
+                            if coder is None:
+                                raise ValueError("Unsupported codec: %s" % codec)
+                            try:
+                                enc = coder.encode(v)
+                            except Exception as e:
+                                print('error coding', codec_sel, symbol, k, start, end)
+                                raise
+                            code_err = np.nanmax(abs(coder.decode(enc) - v) / (abs(v) + coder.rtol_reg))
+                            assert code_err < coder.rtol_max, (round(code_err, 6), symbol, k, start, end)
 
                 buf2 = lz4_compressHC(v.tobytes()) #this is pretty fast, so just try if we are better
-                if not codec or len(buf2) < len(enc):
+                if not codec_sel or len(buf2) < len(enc):
                     enc = buf2
                     codec_sel = None
-                    # print('encoded size is bigger than raw!', len(buf2), len(enc))
-                else:
-                    codec_sel = codec
                 del buf2
 
                 rtn[COLUMNS][k] = {DATA: Binary(enc),
