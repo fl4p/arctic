@@ -469,8 +469,8 @@ class TickStore(object):
         existing_dtype = column_dtypes.get(c)
         if existing_dtype is None or existing_dtype != dtype:
             # Promote ints to floats - as we can't easily represent NaNs
-            if np.issubdtype(dtype, int):
-                dtype = np.dtype('f8')
+            if np.issubdtype(dtype, np.integer): # <- this was `int`
+                dtype = np.dtype('f8') # float64
             column_dtypes[c] = np.promote_types(column_dtypes.get(c, dtype), dtype)
 
     def _prepend_image(self, document, im, rtn_length, column_dtypes, column_set, columns):
