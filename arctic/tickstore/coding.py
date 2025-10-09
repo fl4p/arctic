@@ -122,7 +122,7 @@ class LnQ16_VQL():
         if signed:
             assert i.min() >= 0, (i.min())
             i *= np.sign(arr)
-        i = i.astype(np.long)
+        i = i.astype(np.uint64)
         for _ in range(self.delta_order):
             i = np.diff(i, prepend=0)
         zigzag_encode_inplace(i)
