@@ -131,14 +131,14 @@ register_codec('LnQ15gz', LnQ16_zlib(loq_loss=15)) # for signed trade qty, no VQ
 def index_to_ns(series, dtype):
     try:
         # python 3 & PeriodIndex
-        idx_dt = series.index.astype('datetime64[ns]')
+        idx_dt = series.index.tz_convert('UTC').tz_localize(None).astype('datetime64[ns]')
         assert isinstance(idx_dt, pd.DatetimeIndex), type(idx_dt)
         idx = idx_dt.values.astype(dtype)
         assert idx[1] > idx[0], idx[:4]
         return idx
     except TypeError:
         # python 0.x
-        return series.index.values.astype('datetime64[ns]').astype(dtype)
+        return series.index.tz_convert('UTC').tz_localize(None).values.astype('datetime64[ns]').astype(dtype)
 
 class TickStore(object):
 
@@ -1020,6 +1020,9 @@ class TickStore(object):
             val = df[k].values
             rm = ~np.isnan(val)
             val = val[rm]  # dropna
+
+            if len(val) == 0:
+                continue
 
             enc, codec_sel, gain = TickStore._encode(val, k, to_dtype, codec, dbg_ctx=(symbol, k, tr))
             rtn[COLUMNS][k] = {DATA: Binary(enc),

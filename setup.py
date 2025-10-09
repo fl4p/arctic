@@ -64,7 +64,7 @@ extensions = [
 
 setup(
     name="arctic",
-    version="1.83.12",
+    version="1.83.13",
     author="Man AHL Technology",
     author_email="arctic@man.com",
     description=("AHL Research Versioned TimeSeries and Tick store"),
