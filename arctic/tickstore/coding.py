@@ -122,9 +122,9 @@ class LnQ16_VQL():
         if signed:
             assert i.min() >= 0, (i.min())
             i *= np.sign(arr)
-        i = i.astype(np.uint64)
+        i = i.astype(np.int64)
         for _ in range(self.delta_order):
-            i = np.diff(i, prepend=0)
+            i = np.diff(i, prepend=np.int64(0))
         zigzag_encode_inplace(i)
         assert i.min() >= 0, i.min()
         buf = nparray_varint_encode(i.astype(np.uint64))
