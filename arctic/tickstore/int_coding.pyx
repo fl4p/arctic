@@ -33,7 +33,7 @@ def zigzag_decode_inplace(arr):
 def varint_encode_unsigned(arr, write):
     cdef np.ndarray[unsigned long] val = arr
     cdef Py_ssize_t i
-    cdef int value, bits
+    cdef unsigned long value, bits
     cdef cython.char[:] buf = np.zeros([BUF_SIZ], dtype=np.byte)
     cdef Py_ssize_t pos = 0
 
@@ -63,8 +63,8 @@ def varint_decode_unsigned(buffer, mask):
     cdef const unsigned char[:] buf = buffer
     cdef Py_ssize_t bufLen = len(buffer)
 
-    cdef unsigned long result, mask_ = mask
-    cdef unsigned char b, shift
+    cdef unsigned long result, b, mask_ = mask
+    cdef unsigned char shift
     cdef Py_ssize_t pos = 0, resPos = 0
 
     # here we use signed long as output so we can apply zigzag in-place later
