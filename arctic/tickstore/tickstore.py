@@ -851,24 +851,86 @@ class TickStore(object):
         return rtn, final_image
 
     @staticmethod
-    def _to_bucket(ticks, symbol, initial_image, index_precision='ms', varint_coding=None, to_dtype=None, codec=None):
+    def _encode(v, col_name, to_dtype, codec, dbg_ctx):
+        v, gain = TickStore._ensure_supported_dtypes(v, to_dtype=to_dtype)
+        enc = None
+        codec_sel = None
+        if codec:
+            if codec == 'logQ16_10_dzv' or codec == 'log28Q16_10_dzv':
+                raise ArcticException("deprecated codec")
+            elif codec == 'loq16_10_dzv1':
+                # raise ArcticException("deprecated codec")
+                # todo this one is too slow!
+                enc = encode_logQ16_10_dzv(v, prescale=24, preadd=.001, comp='zlib')
+                code_err = np.nanmax(
+                    abs(decode_logQ16_10_dzv(enc, prescale=24, preadd=.001, comp='zlib') - v) / (v + 1e-10))
+                assert code_err < 250e-6, (round(code_err, 6), dbg_ctx)
+                codec_sel = codec
+            else:
+                # todo select codec based on column name
+                codec_sel = codec[col_name] if isinstance(codec, dict) else codec
+                if codec_sel is not None:
+                    coder = codec_registry.get(codec_sel)
+                    if coder is None:
+                        raise ValueError("Unsupported codec: %s" % codec)
+                    try:
+                        enc = coder.encode(v)
+                    except Exception as e:
+                        print('error coding', codec_sel, dbg_ctx)
+                        raise
+                    code_err = np.nanmax(abs(coder.decode(enc) - v) / (abs(v) + coder.rtol_reg))
+                    assert code_err < coder.rtol_max, (round(code_err, 6), dbg_ctx)
+
+        buf2 = lz4_compressHC(v.tobytes())  # this is pretty fast, so just try if we are better
+        if not codec_sel or len(buf2) < len(enc):
+            enc = buf2
+            codec_sel = None
+        del buf2
+
+        return enc, codec_sel, gain
+
+    @staticmethod
+    def _bucket_head(ticks, symbol, initial_image, index_precision, codec):
+        index_vlq = True
         if index_precision is None:
             index_precision = 'ms'
         if index_precision != 'ms' or codec:
-            assert varint_coding is None or varint_coding == True
-            varint_coding = True
+            assert index_vlq is None or index_vlq
+            index_vlq = True
         else:
-            if varint_coding is None:
-                varint_coding = True
+            if index_vlq is None:
+                index_vlq = True
+        assert index_precision in {'s', 'ms'}
         rtn = {SYMBOL: symbol,
-               VERSION: CHUNK_VERSION_NUMBER if index_precision == 'ms' and not varint_coding and not codec else CHUNK_VERSION_NUMBER + 1,
+               VERSION: CHUNK_VERSION_NUMBER if index_precision == 'ms' and not index_vlq and not codec else CHUNK_VERSION_NUMBER + 1,
                COLUMNS: {}, COUNT: len(ticks)}
         if index_precision != 'ms':
             rtn[INDEX_PRECISION] = index_precision
-        data = {}
-        rowmask = {}
+
         start = to_dt(ticks[0]['index'])
         end = to_dt(ticks[-1]['index'])
+
+        if initial_image:
+            image_start = initial_image.get('index', start)
+            if image_start > start:
+                raise UnorderedDataException("Image timestamp is after first tick: %s > %s" % (
+                    image_start, start))
+            start = min(start, image_start)
+            rtn[IMAGE_DOC] = {IMAGE_TIME: image_start, IMAGE: initial_image}
+
+        rtn[END] = end
+        rtn[START] = start
+
+        return rtn, index_vlq
+
+    @staticmethod
+    def _to_bucket(ticks, symbol, initial_image, index_precision='ms', to_dtype=None, codec=None):
+        rtn, index_vlq = TickStore._bucket_head(ticks, symbol, initial_image, index_precision, codec)
+        tr =  [to_dt(ticks[0]['index']), to_dt(ticks[-1]['index'])]
+
+        data = {}
+        rowmask = {}
+
         final_image = copy.copy(initial_image) if initial_image else {}
         for i, t in enumerate(ticks):
             if initial_image:
@@ -889,44 +951,12 @@ class TickStore(object):
                         rowmask[k][i] = 1
                     data[k] = [v]
 
-        rowmask = dict([(k, Binary(lz4_compressHC(np.packbits(v).tobytes())))
-                        for k, v in rowmask.items()])
+        rowmask = dict([(k, Binary(lz4_compressHC(np.packbits(v).tobytes()))) for k, v in rowmask.items()])
+
         for k, v in data.items():
             if k != 'index':
                 v = np.array(v)
-                v, gain = TickStore._ensure_supported_dtypes(v, to_dtype=to_dtype)
-                enc = None
-                codec_sel = None
-                if codec:
-                    if codec == 'logQ16_10_dzv' or codec == 'log28Q16_10_dzv':
-                        raise ArcticException("deprecated codec")
-                    elif codec == 'loq16_10_dzv1':
-                        # raise ArcticException("deprecated codec")
-                        # todo this one is too slow!
-                        enc = encode_logQ16_10_dzv(v, prescale=24, preadd=.001, comp='zlib')
-                        code_err = np.nanmax(abs(decode_logQ16_10_dzv(enc, prescale=24, preadd=.001, comp='zlib') - v) / (v + 1e-10))
-                        assert code_err < 250e-6, (round(code_err, 6), symbol, k, start, end)
-                        codec_sel = codec
-                    else:
-                        # todo select codec based on column name
-                        codec_sel = codec[k] if isinstance(codec, dict) else codec
-                        if codec_sel is not None:
-                            coder = codec_registry.get(codec_sel)
-                            if coder is None:
-                                raise ValueError("Unsupported codec: %s" % codec)
-                            try:
-                                enc = coder.encode(v)
-                            except Exception as e:
-                                print('error coding', codec_sel, symbol, k, start, end)
-                                raise
-                            code_err = np.nanmax(abs(coder.decode(enc) - v) / (abs(v) + coder.rtol_reg))
-                            assert code_err < coder.rtol_max, (round(code_err, 6), symbol, k, start, end)
-
-                buf2 = lz4_compressHC(v.tobytes()) #this is pretty fast, so just try if we are better
-                if not codec_sel or len(buf2) < len(enc):
-                    enc = buf2
-                    codec_sel = None
-                del buf2
+                enc, codec_sel, gain = TickStore._encode(v, k, to_dtype, codec, dbg_ctx=(symbol, k, tr))
 
                 rtn[COLUMNS][k] = {DATA: Binary(enc),
                                    DTYPE: TickStore._str_dtype(v.dtype),
@@ -938,15 +968,7 @@ class TickStore(object):
                     rtn[COLUMNS][k][GAIN] = gain
                     rtn[VERSION] = max(rtn[VERSION], CHUNK_VERSION_NUMBER_MAX)
 
-        if initial_image:
-            image_start = initial_image.get('index', start)
-            if image_start > start:
-                raise UnorderedDataException("Image timestamp is after first tick: %s > %s" % (
-                    image_start, start))
-            start = min(start, image_start)
-            rtn[IMAGE_DOC] = {IMAGE_TIME: image_start, IMAGE: initial_image}
-        rtn[END] = end
-        rtn[START] = start
+
         if isinstance(data['index'][0], np.datetime64):
             idx = np.concatenate(([data['index'][0].astype(np.uint64)], np.diff(data['index']).astype(np.uint64)))
             # causal conversion ns -> ms
@@ -964,7 +986,7 @@ class TickStore(object):
                  # idx = -(-idx // 1000)  # ceiling int div (alternative) TODO doesnt work with uint*
         if idx.dtype != np.uint64:
             idx = idx.astype(np.uint64)
-        rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if varint_coding else idx.tobytes()))
+        rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
         return rtn, final_image
 
     def max_date(self, symbol):
