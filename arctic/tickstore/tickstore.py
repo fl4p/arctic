@@ -13,7 +13,7 @@ from pymongo import ReadPreference
 from pymongo.errors import OperationFailure
 
 from .coding import nparray_varint_encode, nparray_varint_decode, encode_logQ16_10_dzv, decode_logQ16_10_dzv, \
-    LnQ16_15_VQL_lz4, LnQ16_VQL, LnQ16_zlib
+    LnQ16_VQL, LnQ16_zlib
 
 try:
     from pandas.core.frame import _arrays_to_mgr
@@ -126,6 +126,19 @@ register_codec('LnQ15VQLlz4', LnQ16_VQL(loq_loss=15, comp='lz4')) # for price da
 register_codec('LnQ15gz', LnQ16_zlib(loq_loss=15)) # for signed trade qty, no VQL (no auto-corr)
 # TODO like LnQ25VQLgz but smaller prescale to trade small number precision for bigger range (up to 2e35 or so)
 # this one: LnQ16_VQL(loq_loss=25, comp='zlib', log_prescale=24, loq_preadd=1e-8)
+
+
+def index_to_ns(series, dtype):
+    try:
+        # python 3 & PeriodIndex
+        idx_dt = series.index.astype('datetime64[ns]')
+        assert isinstance(idx_dt, pd.DatetimeIndex), type(idx_dt)
+        idx = idx_dt.values.astype(dtype)
+        assert idx[1] > idx[0], idx[:4]
+        return idx
+    except TypeError:
+        # python 0.x
+        return series.index.values.astype('datetime64[ns]').astype(dtype)
 
 class TickStore(object):
 
@@ -680,9 +693,9 @@ class TickStore(object):
         self._assert_nonoverlapping_data(symbol, to_dt(start), to_dt(end))
 
         if pandas:
-            assert codec is None
-            assert self._index_precision is None or self._index_precision == 'ms'
-            buckets = self._pandas_to_buckets(data, symbol, initial_image, to_dtype=to_dtype)
+            #assert codec is None
+            #assert self._index_precision is None or self._index_precision == 'ms'
+            buckets = self._pandas_to_buckets(data, symbol, initial_image, to_dtype=to_dtype, codec=codec)
         else:
             buckets = self._to_buckets(data, symbol, initial_image, to_dtype=to_dtype, codec=codec)
         self._write(buckets)
@@ -714,11 +727,12 @@ class TickStore(object):
         rate = int(ticks / t) if t != 0 else float("nan")
         logger.debug("%d buckets in %s: approx %s ticks/sec" % (len(buckets), t, rate))
 
-    def _pandas_to_buckets(self, x, symbol, initial_image, to_dtype=None):
+    def _pandas_to_buckets(self, x, symbol, initial_image, to_dtype=None, codec=None):
         rtn = []
         for i in range(0, len(x), self._chunk_size):
-            bucket, initial_image = TickStore._pandas_to_bucket(x[i:i + self._chunk_size], symbol, initial_image,
-                                                                to_dtype=to_dtype)
+            bucket, initial_image = TickStore._to_bucket_pandas(x.iloc[i:i + self._chunk_size], symbol, initial_image,
+                                                                index_precision=self._index_precision,
+                                                                to_dtype=to_dtype, codec=codec)
             rtn.append(bucket)
         return rtn
 
@@ -907,8 +921,11 @@ class TickStore(object):
         if index_precision != 'ms':
             rtn[INDEX_PRECISION] = index_precision
 
-        start = to_dt(ticks[0]['index'])
-        end = to_dt(ticks[-1]['index'])
+        if not isinstance(ticks, pd.DataFrame):
+            start = to_dt(ticks[0]['index'])
+            end = to_dt(ticks[-1]['index'])
+        else:
+            start, end = to_dt(ticks.index[0]), to_dt(ticks.index[-1])
 
         if initial_image:
             image_start = initial_image.get('index', start)
@@ -926,7 +943,7 @@ class TickStore(object):
     @staticmethod
     def _to_bucket(ticks, symbol, initial_image, index_precision='ms', to_dtype=None, codec=None):
         rtn, index_vlq = TickStore._bucket_head(ticks, symbol, initial_image, index_precision, codec)
-        tr =  [to_dt(ticks[0]['index']), to_dt(ticks[-1]['index'])]
+        tr = [to_dt(ticks[0]['index']), to_dt(ticks[-1]['index'])]
 
         data = {}
         rowmask = {}
@@ -968,7 +985,6 @@ class TickStore(object):
                     rtn[COLUMNS][k][GAIN] = gain
                     rtn[VERSION] = max(rtn[VERSION], CHUNK_VERSION_NUMBER_MAX)
 
-
         if isinstance(data['index'][0], np.datetime64):
             idx = np.concatenate(([data['index'][0].astype(np.uint64)], np.diff(data['index']).astype(np.uint64)))
             # causal conversion ns -> ms
@@ -978,16 +994,61 @@ class TickStore(object):
                 s = 1_000_000
             else:
                 raise ValueError(index_precision)
-            idx = np.floor_divide(idx + np.uint64(s-1), np.uint64(s))
+            idx = np.floor_divide(idx + np.uint64(s - 1), np.uint64(s))
         else:
             idx = np.concatenate(([data['index'][0].astype(np.uint64)], np.diff(data['index']).astype(np.uint64)))
             if index_precision == 's':
                 idx = np.floor_divide(idx + np.uint64(1_000 - 1), np.uint64(1_000))
-                 # idx = -(-idx // 1000)  # ceiling int div (alternative) TODO doesnt work with uint*
+                # idx = -(-idx // 1000)  # ceiling int div (alternative) TODO doesnt work with uint*
         if idx.dtype != np.uint64:
             idx = idx.astype(np.uint64)
         rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
         return rtn, final_image
+
+    @staticmethod
+    def _to_bucket_pandas(df, symbol, initial_image, index_precision='ms', to_dtype=None, codec=None):
+        rtn, index_vlq = TickStore._bucket_head(df, symbol, initial_image, index_precision, codec)
+        tr = [to_dt(df.index[0]), to_dt(df.index[-1])]
+
+        assert not initial_image
+
+        idx = index_to_ns(df, np.int64)
+        idx = np.diff(idx, prepend=np.int64(0))
+        assert idx.min() >= 0, "non monotonic index"
+
+        for k in df.columns:
+            val = df[k].values
+            rm = ~np.isnan(val)
+            val = val[rm]  # dropna
+
+            enc, codec_sel, gain = TickStore._encode(val, k, to_dtype, codec, dbg_ctx=(symbol, k, tr))
+            rtn[COLUMNS][k] = {DATA: Binary(enc),
+                               DTYPE: TickStore._str_dtype(val.dtype),
+                               ROWMASK: Binary(lz4_compressHC(np.packbits(rm).tobytes()))}
+            if codec_sel:
+                rtn[COLUMNS][k][CODEC] = codec_sel
+            if gain:
+                rtn[COLUMNS][k][GAIN] = gain
+                rtn[VERSION] = max(rtn[VERSION], CHUNK_VERSION_NUMBER_MAX)
+
+
+        if index_precision == 's':
+            s = 1_000_000_000
+        elif index_precision == 'ms':
+            s = 1_000_000
+        else:
+            raise ValueError(index_precision)
+
+        if idx.dtype != np.uint64:
+            idx = idx.astype(np.uint64)
+
+        if s != 1:
+            idx = np.floor_divide(idx + np.uint64(s - 1), np.uint64(s)) # causal conversion ns -> ms
+        # idx = -(-idx // s)  # floor_divide with uint is slightly faster
+        assert idx.dtype == np.uint64
+        rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
+
+        return rtn, {}
 
     def max_date(self, symbol):
         """

@@ -13,3 +13,11 @@ It comes with a couple of compression techniques to lower disk usage.
 * Added index varint compression
 
 
+# TODO
+
+- implement cache hook and test performance (tickstore buckets)
+- use zlib for rowmask and index?
+- index precision 2s
+- profile and optimize writes/reads
+- benchmark the index VLQ
+- 
