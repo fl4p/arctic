@@ -704,6 +704,7 @@ class TickStore(object):
             buckets = self._pandas_to_buckets(data, symbol, initial_image, to_dtype=to_dtype, codec=codec)
         else:
             buckets = self._to_buckets(data, symbol, initial_image, to_dtype=to_dtype, codec=codec)
+
         self._write(buckets)
 
         if metadata:
@@ -719,7 +720,10 @@ class TickStore(object):
                 self.last_write_bytes_per_col[cn] += len(cd['d']) + len(cd['m'])
             self.last_write_bytes_per_col['_i'] += len(b['i'])
 
-        mongo_retry(self._collection.insert_many)(buckets)
+        res: InsertManyResult = mongo_retry(self._collection.insert_many)(buckets)
+        assert res.acknowledged
+        assert len(res.inserted_ids) == len(buckets)
+
         self.last_write_bytes = (
             sum(len(b["i"]) for b in buckets),
             sum(len(c["d"]) for b in buckets for c in b['cs'].values()),
