@@ -139,7 +139,7 @@ def index_to_ns(series, dtype):
         idx_dt = series.index.tz_convert('UTC').tz_localize(None).astype('datetime64[ns]')
         assert isinstance(idx_dt, pd.DatetimeIndex), type(idx_dt)
         idx = idx_dt.values.astype(dtype)
-        assert idx[1] > idx[0], idx[:4]
+        # assert idx[1] > idx[0], idx[:4]
         return idx
     except TypeError:
         # python 0.x
@@ -948,22 +948,23 @@ class TickStore(object):
         return enc, codec_sel, gain
 
     @staticmethod
-    def _bucket_head(ticks, symbol, initial_image, index_precision, codec):
+    def _bucket_head(ticks, symbol, initial_image, index_precision:int, codec):
         index_vlq = True
-        if index_precision is None:
-            index_precision = 'ms'
-        if index_precision != 'ms' or codec:
-            assert index_vlq is None or index_vlq
-            index_vlq = True
-        else:
-            if index_vlq is None:
-                index_vlq = True
-        assert index_precision in {'s', 'ms'}
+        assert isinstance(index_precision, (np.integer,int)) and index_precision > 0, (index_precision, type(index_precision))
+        is_ms = index_precision == 1_000_000
+
         rtn = {SYMBOL: symbol,
-               VERSION: CHUNK_VERSION_NUMBER if index_precision == 'ms' and not index_vlq and not codec else CHUNK_VERSION_NUMBER + 1,
+               VERSION: CHUNK_VERSION_NUMBER if is_ms and not index_vlq and not codec else CHUNK_VERSION_NUMBER + 1,
                COLUMNS: {}, COUNT: len(ticks)}
-        if index_precision != 'ms':
-            rtn[INDEX_PRECISION] = index_precision
+
+
+        if not is_ms:
+            if index_precision == 1_000_000_000:
+                rtn[INDEX_PRECISION] = 's'
+            elif (index_precision % 1_000_000_000) == 0:
+                rtn[INDEX_PRECISION] = str(index_precision//1_000_000_000) + 's'
+            else:
+                rtn[INDEX_PRECISION] = index_precision
 
         if not isinstance(ticks, pd.DataFrame):
             start = to_dt(ticks[0]['index'])
@@ -985,7 +986,7 @@ class TickStore(object):
         return rtn, index_vlq
 
     @staticmethod
-    def _to_bucket(ticks, symbol, initial_image, index_precision='ms', to_dtype=None, codec=None, verify_codec=True):
+    def _to_bucket(ticks, symbol, initial_image, index_precision:str|int='ms', to_dtype=None, codec=None, verify_codec=True):
         rtn, index_vlq = TickStore._bucket_head(ticks, symbol, initial_image, index_precision, codec)
         tr = [to_dt(ticks[0]['index']), to_dt(ticks[-1]['index'])]
 
@@ -1029,28 +1030,28 @@ class TickStore(object):
                     rtn[COLUMNS][k][GAIN] = gain
                     rtn[VERSION] = max(rtn[VERSION], CHUNK_VERSION_NUMBER_MAX)
 
+        is_ms = index_precision == 1_000_000
+        assert is_ms or index_precision == 1_000_000_000
+
         if isinstance(data['index'][0], np.datetime64):
-            idx = np.concatenate(([data['index'][0].astype(np.uint64)], np.diff(data['index']).astype(np.uint64)))
-            # causal conversion ns -> ms
-            if index_precision == 's':
-                s = 1_000_000_000
-            elif index_precision == 'ms':
-                s = 1_000_000
-            else:
-                raise ValueError(index_precision)
-            idx = np.floor_divide(idx + np.uint64(s - 1), np.uint64(s))
+            idx = np.concatenate(([data['index'][0].astype(np.int64)], np.diff(data['index']).astype(np.int64)))
+            s = np.int64(index_precision)
         else:
-            idx = np.concatenate(([data['index'][0].astype(np.uint64)], np.diff(data['index']).astype(np.uint64)))
-            if index_precision == 's':
-                idx = np.floor_divide(idx + np.uint64(1_000 - 1), np.uint64(1_000))
-                # idx = -(-idx // 1000)  # ceiling int div (alternative) TODO doesnt work with uint*
+            # assume ms integers
+            idx = np.concatenate((np.int64([data['index'][0]]), np.diff(data['index']).astype(np.int64)))
+            assert index_precision >= 1_000_000
+            assert (index_precision % 1_000_000) == 0
+            s = np.int64(index_precision) / 1_000_000
+        if s != 1:
+            assert idx.dtype == np.int64
+            idx = -(-idx // s)  # causal conversion ns -> ms, s
         if idx.dtype != np.uint64:
-            idx = idx.astype(np.uint64)
+            idx = idx.astype(np.uint64)  # TODO  use .view()
         rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
         return rtn, final_image
 
     @staticmethod
-    def _to_bucket_pandas(df, symbol, initial_image, index_precision='ms', to_dtype=None, codec=None, verify_codec=True,
+    def _to_bucket_pandas(df, symbol, initial_image, index_precision, to_dtype=None, codec=None, verify_codec=True,
                           binary_class=Binary):
         rtn, index_vlq = TickStore._bucket_head(df, symbol, initial_image, index_precision, codec)
         tr = [to_dt(df.index[0]), to_dt(df.index[-1])]
@@ -1059,9 +1060,33 @@ class TickStore(object):
 
         assert not initial_image
 
-        idx = index_to_ns(df, np.int64)
+        idx = index_to_ns(df, np.int64) # can't use np.uint64 here for timestamps before unix epoch
+
+        assert isinstance(index_precision, (np.integer,int)), (index_precision, type(index_precision))
+        assert index_precision > 0
+        s = np.int64(index_precision)
+
+        if s != 1:
+            assert idx.dtype == np.int64
+            idx = -(-idx // s)  # causal conversion ns -> ms, s
+
+        assert idx.dtype == np.int64
+        # internally np.diff converts to int64 and raises on overflow
+        # also there is no safe check for monotony with uint64 input ?
         idx = np.diff(idx, prepend=np.int64(0))
-        assert idx.min() >= 0, "non monotonic index"
+        if  idx[1:].min() < 0:
+            raise ValueError("non monotonic index")
+        assert idx.dtype == np.int64
+        #if idx[0] < 0:
+        #    idx[0] = (2<<(64-1)) + idx[0] # equal to `idx[0].view(np.uint64)` buf faster
+        #assert idx[0] >= 0
+
+        # now it is safe to to an unsafe reinterpreting cast of the int64 to uint64
+        idx = idx.view(np.uint64) # no cost O(0)
+
+        rtn[INDEX] = binary_class(lz4_compressHC(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
+
+
 
         for k in df.columns:
             val = df[k].values
@@ -1081,22 +1106,6 @@ class TickStore(object):
                 rtn[COLUMNS][k][GAIN] = gain
                 rtn[VERSION] = max(rtn[VERSION], CHUNK_VERSION_NUMBER_MAX)
 
-
-        if index_precision == 's':
-            s = 1_000_000_000
-        elif index_precision == 'ms':
-            s = 1_000_000
-        else:
-            raise ValueError(index_precision)
-
-        if idx.dtype != np.uint64:
-            idx = idx.astype(np.uint64)
-
-        if s != 1:
-            idx = np.floor_divide(idx + np.uint64(s - 1), np.uint64(s)) # causal conversion ns -> ms
-        # idx = -(-idx // s)  # floor_divide with uint is slightly faster
-        assert idx.dtype == np.uint64
-        rtn[INDEX] = binary_class(lz4_compressHC(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
 
         return rtn, {}
 
