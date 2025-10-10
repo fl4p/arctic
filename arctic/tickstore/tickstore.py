@@ -483,6 +483,9 @@ class TickStore(object):
             rtn[k] = v
         return rtn
 
+    _INDEX_PREC_TO_MS = {"2s": 2000, "3s": 3000, "4s": 4000, "5s": 5000,
+         "10s": 10_000, "20s": 20_000, "30s": 30_000, "60s": 60_000, "1min": 60_000}
+
     @staticmethod
     def _set_or_promote_dtype(column_dtypes, c, dtype):
         existing_dtype = column_dtypes.get(c)
@@ -738,18 +741,34 @@ class TickStore(object):
 
     def _pandas_to_buckets(self, x, symbol, initial_image, to_dtype=None, codec=None):
         rtn = []
+        idx_prec = self._index_precision_int
         for i in range(0, len(x), self._chunk_size):
             bucket, initial_image = TickStore._to_bucket_pandas(x.iloc[i:i + self._chunk_size], symbol, initial_image,
-                                                                index_precision=self._index_precision,
+                                                                index_precision=idx_prec,
                                                                 to_dtype=to_dtype, codec=codec, verify_codec=self._verify_codec)
             rtn.append(bucket)
         return rtn
 
+    @property
+    def _index_precision_int(self):
+        if self._index_precision is None or self._index_precision == 'ms':
+            i = 1_000_000  # ms->ns
+        elif self._index_precision == 's':
+            i = 1_000_000_000  # s->ns
+        elif isinstance(self._index_precision, str) and self._index_precision[0].isdigit():
+            i = np.int64(pd.to_timedelta(self._index_precision).total_seconds() * 1e9)
+            assert i > 0
+        else:
+            raise ValueError("unrecognized index_precision %s" % self._index_precision)
+        return i
+
+
     def _to_buckets(self, x, symbol, initial_image, to_dtype=None, codec=None):
         rtn = []
+        idx_prec = self._index_precision_int
         for i in range(0, len(x), self._chunk_size):
             bucket, initial_image = TickStore._to_bucket(x[i:i + self._chunk_size], symbol, initial_image,
-                                                         index_precision=self._index_precision,
+                                                         index_precision=idx_prec,
                                                          to_dtype=to_dtype, codec=codec, verify_codec=self._verify_codec)
             rtn.append(bucket)
         return rtn
