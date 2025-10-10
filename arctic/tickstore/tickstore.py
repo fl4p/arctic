@@ -1,4 +1,4 @@
-from __future__ import print_function
+from __future__ import print_function, annotations
 
 import copy
 import logging
@@ -11,6 +11,7 @@ import pymongo
 from bson.binary import Binary
 from pymongo import ReadPreference
 from pymongo.errors import OperationFailure
+from pymongo.results import InsertManyResult
 
 from .coding import nparray_varint_encode, nparray_varint_decode, encode_logQ16_10_dzv, decode_logQ16_10_dzv, \
     LnQ16_VQL, LnQ16_zlib
