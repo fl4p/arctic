@@ -1013,7 +1013,8 @@ class TickStore(object):
         return rtn, final_image
 
     @staticmethod
-    def _to_bucket_pandas(df, symbol, initial_image, index_precision='ms', to_dtype=None, codec=None, verify_codec=True):
+    def _to_bucket_pandas(df, symbol, initial_image, index_precision='ms', to_dtype=None, codec=None, verify_codec=True,
+                          binary_class=Binary):
         rtn, index_vlq = TickStore._bucket_head(df, symbol, initial_image, index_precision, codec)
         tr = [to_dt(df.index[0]), to_dt(df.index[-1])]
 
@@ -1034,9 +1035,9 @@ class TickStore(object):
                 continue
 
             enc, codec_sel, gain = TickStore._encode(val, k, to_dtype, codec, verify_codec, dbg_ctx=(symbol, k, tr))
-            rtn[COLUMNS][k] = {DATA: Binary(enc),
+            rtn[COLUMNS][k] = {DATA: binary_class(enc),
                                DTYPE: TickStore._str_dtype(val.dtype),
-                               ROWMASK: Binary(lz4_compressHC(np.packbits(rm).tobytes()))}
+                               ROWMASK: binary_class(lz4_compressHC(np.packbits(rm).tobytes()))}
             if codec_sel:
                 rtn[COLUMNS][k][CODEC] = codec_sel
             if gain:
@@ -1058,7 +1059,7 @@ class TickStore(object):
             idx = np.floor_divide(idx + np.uint64(s - 1), np.uint64(s)) # causal conversion ns -> ms
         # idx = -(-idx // s)  # floor_divide with uint is slightly faster
         assert idx.dtype == np.uint64
-        rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
+        rtn[INDEX] = binary_class(lz4_compressHC(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
 
         return rtn, {}
 

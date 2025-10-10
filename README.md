@@ -12,6 +12,8 @@ It comes with a couple of compression techniques to lower disk usage.
   tolerance of 0.02 % (200ppm) for numbers in the range `[1e-9, 2e31]` (use: `ts.write(..., codec='loq16_10_dzv1')`)
 * Uses `zlib` instead of `lz4`
 * Added index varint compression
+* Fixed pickling for e.g. multi-process jobs (`joblib`)
+* Added write and read statistics (number of compressed bytes per column)
 
 
 # TODO
