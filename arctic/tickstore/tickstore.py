@@ -728,23 +728,34 @@ class TickStore(object):
                                        {SYMBOL: symbol, META: metadata},
                                        upsert=True)
 
+    @staticmethod
+    def _get_buckets_size_stats_idm(buckets):
+        return (
+            sum(len(b["i"]) for b in buckets),
+            sum(len(c["d"]) for b in buckets for c in b['cs'].values()),
+            sum(len(c["m"]) for b in buckets for c in b['cs'].values()),
+        )
+
+    @staticmethod
+    def _get_buckets_size_by_col(buckets):
+        last_write_bytes_per_col = defaultdict(int)
+        for b in buckets:
+            assert isinstance(b, dict), type(b)
+            for cn, cd in b['cs'].items():
+                last_write_bytes_per_col[cn] += len(cd['d']) + len(cd['m'])
+            last_write_bytes_per_col['_i'] += len(b['i'])
+        return last_write_bytes_per_col
+
     def _write(self, buckets):
         start = dt.now()
-        self.last_write_bytes_per_col = defaultdict(int)
-        for b in buckets:
-            for cn, cd in b['cs'].items():
-                self.last_write_bytes_per_col[cn] += len(cd['d']) + len(cd['m'])
-            self.last_write_bytes_per_col['_i'] += len(b['i'])
+
+        self.last_write_bytes_per_col = TickStore._get_buckets_size_by_col(buckets)
 
         res: InsertManyResult = mongo_retry(self._collection.insert_many)(buckets)
         assert res.acknowledged
         assert len(res.inserted_ids) == len(buckets)
 
-        self.last_write_bytes = (
-            sum(len(b["i"]) for b in buckets),
-            sum(len(c["d"]) for b in buckets for c in b['cs'].values()),
-            sum(len(c["m"]) for b in buckets for c in b['cs'].values()),
-        )
+        self.last_write_bytes = TickStore._get_buckets_size_stats_idm(buckets)
 
 
         t = (dt.now() - start).total_seconds()
