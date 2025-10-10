@@ -143,7 +143,7 @@ class Arctic(object):
 
             if self.__conn is None:
                 host = get_mongodb_uri(self.mongo_host)
-                logger.info("Connecting to mongo: {0} ({1})".format(self.mongo_host, host))
+                logger.info("Connecting to mongo: {0} ({1} {2})".format(self.mongo_host, host, self._pymongo_kwargs))
                 self.__conn = pymongo.MongoClient(host=host,
                                                   maxPoolSize=self._MAX_CONNS,
                                                   socketTimeoutMS=self._socket_timeout,
@@ -183,6 +183,7 @@ class Arctic(object):
 
     def __getstate__(self):
         return {'mongo_host': self.mongo_host,
+                **self._pymongo_kwargs,
                 'app_name': self._application_name,
                 'allow_secondary': self._allow_secondary,
                 'socketTimeoutMS': self._socket_timeout,

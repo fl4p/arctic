@@ -726,7 +726,6 @@ class TickStore(object):
         )
 
 
-
         t = (dt.now() - start).total_seconds()
         ticks = len(buckets) * self._chunk_size
         rate = int(ticks / t) if t != 0 else float("nan")
@@ -1017,6 +1016,8 @@ class TickStore(object):
     def _to_bucket_pandas(df, symbol, initial_image, index_precision='ms', to_dtype=None, codec=None, verify_codec=True):
         rtn, index_vlq = TickStore._bucket_head(df, symbol, initial_image, index_precision, codec)
         tr = [to_dt(df.index[0]), to_dt(df.index[-1])]
+
+        assert len(df) > 1, len(df)
 
         assert not initial_image
 
