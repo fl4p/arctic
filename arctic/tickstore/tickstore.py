@@ -764,15 +764,19 @@ class TickStore(object):
 
     @property
     def _index_precision_int(self):
-        if self._index_precision is None or self._index_precision == 'ms':
+        return TickStore.index_precision_to_ns(self._index_precision)
+
+    @staticmethod
+    def index_precision_to_ns(prec:str|int):
+        if prec is None or prec == 'ms':
             i = 1_000_000  # ms->ns
-        elif self._index_precision == 's':
+        elif prec == 's':
             i = 1_000_000_000  # s->ns
-        elif isinstance(self._index_precision, str) and self._index_precision[0].isdigit():
-            i = np.int64(pd.to_timedelta(self._index_precision).total_seconds() * 1e9)
+        elif isinstance(prec, str) and prec[0].isdigit():
+            i = np.int64(pd.to_timedelta(prec).total_seconds() * 1e9)
             assert i > 0
         else:
-            raise ValueError("unrecognized index_precision %s" % self._index_precision)
+            raise ValueError("unrecognized index_precision %s" % prec)
         return i
 
 
