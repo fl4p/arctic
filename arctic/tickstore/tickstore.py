@@ -537,8 +537,21 @@ class TickStore(object):
             rtn[INDEX] = np.cumsum(np.frombuffer(buf, dtype='uint64'))
         del buf
 
-        if doc.get(INDEX_PRECISION, 'ms') == 's':
+        ip = doc.get(INDEX_PRECISION, 'ms')
+        if ip == 's' or ip == '1s':
             rtn[INDEX] *= 1000
+        elif ip == 'ms' or ip == '1ms':
+            pass
+        else:
+            s = TickStore._INDEX_PREC_TO_MS[ip]
+            if s is None:
+                s = pd.to_timedelta(ip).total_seconds() * 1000
+                assert s >= 1 and int(s) == s # TODO add support for sub-ms precision
+                s = int(s)
+                TickStore._INDEX_PREC_TO_MS[ip] = s
+
+            rtn[INDEX] *= s
+
 
         doc_length = len(rtn[INDEX])
         column_set.update(doc[COLUMNS].keys())
