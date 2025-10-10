@@ -174,7 +174,7 @@ class TickStore(object):
         # Do we allow reading from secondaries
         self._allow_secondary = self._arctic_lib.arctic._allow_secondary
         self._chunk_size = chunk_size
-        assert index_precision in ('ms', 's')
+        #assert index_precision in ('ms', 's')
         self._index_precision = index_precision
         self._verify_codec = True
         self._reset()
