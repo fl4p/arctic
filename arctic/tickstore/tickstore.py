@@ -1089,7 +1089,7 @@ class TickStore(object):
 
     @staticmethod
     def _to_bucket_pandas(df, symbol, initial_image, index_precision, to_dtype=None, codec=None, verify_codec=True,
-                          binary_class=Binary):
+                          binary_class=Binary, index_compressor='lz4'):
         rtn, index_vlq = TickStore._bucket_head(df, symbol, initial_image, index_precision, codec)
         tr = [to_dt(df.index[0]), to_dt(df.index[-1])]
 
@@ -1121,9 +1121,20 @@ class TickStore(object):
         # now it is safe to to an unsafe reinterpreting cast of the int64 to uint64
         idx = idx.view(np.uint64) # no cost O(0)
 
-        rtn[INDEX] = binary_class(lz4_compressHC(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
 
 
+        compressor = dict(
+            lz4=lz4_compressHC,
+            gz=zlib.compress, #partial(zlib.compress, wbits=15),
+            lzma=lambda d: lzma.compress(d, format=lzma.FORMAT_ALONE, preset=lzma.PRESET_EXTREME),
+            n=lambda d: d,
+        ).get(index_compressor)
+        assert compressor is not None, ("unknown compressor %s" % index_compressor)
+        if index_compressor != 'lz4':
+            assert INDEX_COMPRESSION not in rtn
+            rtn[INDEX_COMPRESSION] = index_compressor
+
+        rtn[INDEX] = binary_class(compressor(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
 
         for k in df.columns:
             val = df[k].values
@@ -1136,7 +1147,7 @@ class TickStore(object):
             enc, codec_sel, gain = TickStore._encode(val, k, to_dtype, codec, verify_codec, dbg_ctx=(symbol, k, tr))
             rtn[COLUMNS][k] = {DATA: binary_class(enc),
                                DTYPE: TickStore._str_dtype(val.dtype),
-                               ROWMASK: binary_class(lz4_compressHC(np.packbits(rm).tobytes()))}
+                               ROWMASK: binary_class(compressor(np.packbits(rm).tobytes()))}
             if codec_sel:
                 rtn[COLUMNS][k][CODEC] = codec_sel
             if gain:
