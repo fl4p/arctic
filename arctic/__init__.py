@@ -9,8 +9,11 @@ from .store._pandas_ndarray_store import PandasDataFrameStore, PandasSeriesStore
 from .store.version_store import register_versioned_storage, register_version
 
 try:
-    from pkg_resources import get_distribution
-    str_version = get_distribution(__name__).version.strip()
+    # TODO
+    # https://setuptools.pypa.io/en/latest/pkg_resources.html
+    #from pkg_resources import get_distribution
+    from importlib.metadata import version
+    str_version = version(__name__).strip() #get_distribution(__name__).version.strip()
     int_parts = tuple(int(x) for x in str_version.split('.'))
     num_version = sum([1000 ** i * v for i, v in enumerate(reversed(int_parts))])
     register_version(str_version, num_version)
