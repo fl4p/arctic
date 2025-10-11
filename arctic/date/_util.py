@@ -108,6 +108,7 @@ def to_dt(date, default_tz=None):
         return ms_to_datetime(date, default_tz)
     elif isinstance(date, np.datetime64):
         if not default_tz:
+            # TODO bug? np.datetime64 does not hold any tzinfo. in the lower branch we throe ValueError, why not here?
             return np.datetime64(date, "ms").astype(datetime.datetime)
         return np.datetime64(date, "ms").astype(datetime.datetime).replace(tzinfo=default_tz)
         # return datetime.datetime.fromtimestamp(date.astype(int)/int(1e-9), tz=default_tz)
