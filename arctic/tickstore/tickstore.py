@@ -759,13 +759,11 @@ class TickStore(object):
         start = dt.now()
 
         self.last_write_bytes_per_col = TickStore._get_buckets_size_by_col(buckets)
+        self.last_write_bytes = TickStore._get_buckets_size_stats_idm(buckets)
 
         res: InsertManyResult = mongo_retry(self._collection.insert_many)(buckets)
         assert res.acknowledged
         assert len(res.inserted_ids) == len(buckets)
-
-        self.last_write_bytes = TickStore._get_buckets_size_stats_idm(buckets)
-
 
         t = (dt.now() - start).total_seconds()
         ticks = len(buckets) * self._chunk_size
