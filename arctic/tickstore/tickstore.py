@@ -160,7 +160,7 @@ class TickStore(object):
 
         self._metadata.create_index([(SYMBOL, pymongo.ASCENDING)], background=True, unique=True)
 
-    def __init__(self, arctic_lib, chunk_size=100000, index_precision='ms'):
+    def __init__(self, arctic_lib, chunk_size=100000, index_precision='ms', verify_codec=True):
         """
         Parameters
         ----------
@@ -176,7 +176,7 @@ class TickStore(object):
         self._chunk_size = chunk_size
         #assert index_precision in ('ms', 's')
         self._index_precision = index_precision
-        self._verify_codec = True
+        self._verify_codec = verify_codec
         self._reset()
 
     @mongo_retry
@@ -186,10 +186,12 @@ class TickStore(object):
         self._metadata = self._collection.metadata
 
     def __getstate__(self):
-        return {'arctic_lib': self._arctic_lib}
+        return {'arctic_lib': self._arctic_lib, 'chunk_size': self._chunk_size, 'index_precision': self._index_precision,
+                'verify_codec': self._verify_codec}
 
     def __setstate__(self, state):
-        return TickStore.__init__(self, state['arctic_lib'])
+        return TickStore.__init__(self, state['arctic_lib'], chunk_size=state['chunk_size'], index_precision=state['index_precision'],
+                                  verify_codec=state['verify_codec'])
 
     def __str__(self):
         return """<%s at %s>
