@@ -964,6 +964,8 @@ class TickStore(object):
 
         return enc, codec_sel, gain
 
+    TZ_UTC = datetime.timezone.utc
+
     @staticmethod
     def _bucket_head(ticks, symbol, initial_image, index_precision:int, codec):
         index_vlq = True
@@ -984,10 +986,28 @@ class TickStore(object):
                 rtn[INDEX_PRECISION] = index_precision
 
         if not isinstance(ticks, pd.DataFrame):
-            start = to_dt(ticks[0]['index'])
-            end = to_dt(ticks[-1]['index'])
+            start:datetime.datetime= to_dt(ticks[0]['index'])
+            end: datetime.datetime = to_dt(ticks[-1]['index'])
         else:
             start, end = to_dt(ticks.index[0]), to_dt(ticks.index[-1])
+        assert isinstance(start, datetime.datetime) and isinstance(end, datetime.datetime)
+
+        # this is actually not necessary, because we convert to timestamp later and store without tzinfo
+        assume_utc = lambda dt: dt.astimezone(TickStore.TZ_UTC) if dt.tzinfo else dt.replace(tzinfo=TickStore.TZ_UTC)
+        start = assume_utc(start)
+        end = assume_utc(end)
+        assert end.tzinfo == start.tzinfo == TickStore.TZ_UTC
+        if not (start < end):
+            raise ValueError('start >= end')
+
+        ceil = lambda i: -(-np.int64(i) // np.int64(index_precision)) * np.int64(index_precision)
+        start = datetime.datetime.fromtimestamp(ceil(start.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
+        end = datetime.datetime.fromtimestamp(ceil(end.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
+
+        #to_ns = lambda t:np.datetime64(t).astype('datetime64[ns]').astype(np.int64)
+        #ns_to_dt = lambda ns, tzi: np.datetime64(int(ns), 'ns').astype(datetime.datetime).replace(tzinfo=tzi)
+        #start = ns_to_dt(ceil(to_ns(start)), tzi=start.tzinfo)
+        #end = ns_to_dt(ceil(to_ns(start)), end.tzinfo)
 
         if initial_image:
             image_start = initial_image.get('index', start)
