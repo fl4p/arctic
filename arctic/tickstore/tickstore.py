@@ -1,13 +1,19 @@
 from __future__ import print_function, annotations
 
 import copy
+import datetime
 import logging
+import lzma
+import zlib
 from collections import defaultdict
 from datetime import datetime as dt, timedelta
+from functools import partial
 
+import lz4
 import numpy as np
 import pandas as pd
 import pymongo
+import pytz
 from bson.binary import Binary
 from pymongo import ReadPreference
 from pymongo.errors import OperationFailure
@@ -101,6 +107,7 @@ GAIN = 'g'  # factor, (pre)scaler, gain,
 COUNT = 'c'
 VERSION = 'v'
 INDEX_PRECISION = 'p'
+INDEX_COMPRESSION = 'd'
 
 META = 'md'
 
