@@ -107,7 +107,7 @@ def test_tickstore_to_bucket_varint():
 
     cols = set()
     column_dtypes = {}
-    rtb = TickStore._read_bucket(None, bucket, cols, column_dtypes, None, None, None)
+    rtb = TickStore._decode_bucket(None, bucket, cols, column_dtypes, None, None, None)
     assert np.all(rtb[INDEX] == [i*1000 for i  in index_ts ])
     assert np.all(rtb['A'] == [124, 125, 126])
     assert math.isnan(rtb['B'][0]) and np.all(rtb['B'][1:] == [27.2, 24.2])

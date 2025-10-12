@@ -166,15 +166,17 @@ def index_to_ns(series, dtype):
         return series.index.tz_convert('UTC').tz_localize(None).values.astype('datetime64[ns]').astype(dtype)
 
 def dt2ns(dt):
-    # TODO view?
-    if dt.tzinfo:
-        dt = dt.astimezone(TickStore.TZ_UTC).replace(tzinfo=None) # todo test
-    return np.datetime64(dt).astype('datetime64[ns]').astype(np.int64)
+    if isinstance(dt, pd.Timestamp):
+        return dt.value # int
+    elif isinstance(dt, np.datetime64):
+        return dt.astype('datetime64[ns]').view(int)
+    elif isinstance(dt, datetime.datetime):
+        return pd.Timestamp(dt).value
+    else:
+        raise TypeError('dt must be pd.Timestamp or np.datetime64 or datetime.datetime')
 
 def ns2dt(ns, **kwargs):
     return pd.to_datetime(ns, unit='ns', **kwargs)
-    # return pd.to_datetime(ns, unit='ns')
-    #datetime.datetime.fromtimestamp(ceil(start.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
 
 class TickStore(object):
 
@@ -383,6 +385,7 @@ class TickStore(object):
                                (INDEX, 1),
                                (INDEX_PRECISION, 1),
                                (START, 1),
+                               (END, 1),
                                (VERSION, 1),
                                (IMAGE_DOC, 1)] +
                               [(COLUMNS + '.%s' % c, 1) for c in columns])
@@ -392,6 +395,7 @@ class TickStore(object):
                                (INDEX, 1),
                                (INDEX_PRECISION, 1),
                                (START, 1),
+                               (END, 1),
                                (VERSION, 1),
                                (COLUMNS, 1),
                                (IMAGE_DOC, 1)])
@@ -411,14 +415,15 @@ class TickStore(object):
             if num > 20:
                 cursor = progressbar(cursor, prefix=symbol, count=num)
         for b in cursor:
-            data = self._read_bucket(b, column_set, column_dtypes,
-                                     multiple_symbols or (columns is not None and 'SYMBOL' in columns),
-                                     include_images, columns)
+            data = self._decode_bucket(b, column_set, column_dtypes,
+                                       multiple_symbols or (columns is not None and 'SYMBOL' in columns),
+                                       include_images, columns)
             for k, v in data.items():
                 try:
                     rtn[k].append(v)
                 except KeyError:
                     rtn[k] = [v]
+
             # For testing
             ticks_read += len(data[INDEX])
             bytes_i += len(b['i'])
@@ -516,9 +521,12 @@ class TickStore(object):
         rate = int(ticks / t) if t != 0 else float("nan")
         logger.info("%d rows in %s secs: %s ticks/sec" % (ticks, t, rate))
         if not rtn.index.is_monotonic_increasing:
+            print('non monotonic increasing index')
+            nmi = np.argmin(np.diff(rtn.index.values))
+            print('non monotonicy here:\n' + ('\n'.join(map(str, rtn.index.values[nmi-2:nmi+10]))))
+            assert False, (symbol, rtn.index.values[nmi-2:nmi+2])
             logger.error("TimeSeries data is out of order, sorting!")
             rtn = rtn.sort_index(kind='mergesort')
-            assert False
 
         if date_range:
             # FIXME: support DateRange.interval...
@@ -632,7 +640,7 @@ class TickStore(object):
                 document[field] = np.insert(document[field], 0, document[field].dtype.type(val))
         return document
 
-    def _read_bucket(self, doc, column_set, column_dtypes, include_symbol, include_images, columns):
+    def _decode_bucket(self, doc, column_set, column_dtypes, include_symbol, include_images, columns):
         rtn = {}
         if doc[VERSION] != 3 and doc[VERSION] != CHUNK_VERSION_NUMBER_MAX:
             raise ArcticException("Unhandled document version: %s" % doc[VERSION])
@@ -646,11 +654,13 @@ class TickStore(object):
             rtn[INDEX] = np.cumsum(np.frombuffer(buf, dtype='uint64'))
         del buf
 
+        ns_prec = 1
         ip = doc.get(INDEX_PRECISION, 'ms')
         if ip == 's' or ip == '1s':
             rtn[INDEX] *= 1000
+            ns_prec = 1000_000_000
         elif ip == 'ms' or ip == '1ms':
-            pass
+            ns_prec = 1000_000
         else:
             s = TickStore._INDEX_PREC_TO_MS[ip]
             if s is None:
@@ -660,6 +670,14 @@ class TickStore(object):
                 TickStore._INDEX_PREC_TO_MS[ip] = s
 
             rtn[INDEX] *= s
+            ns_prec = 1000_000 * s
+
+        start_ns = dt2ns(doc[START])
+        end_ns = dt2ns(doc[END])
+        assert start_ns %ns_prec == 0, (start_ns / ns_prec)
+        assert end_ns % ns_prec == 0, (end_ns / ns_prec)
+        assert rtn[INDEX][0]*1000_000 == dt2ns(doc[START])
+        assert rtn[INDEX][-1]*1000_000 == dt2ns(doc[END]), (self._index_precision, rtn[INDEX][-1]*1000_000, dt2ns(doc[END]))
 
 
         doc_length = len(rtn[INDEX])
@@ -810,18 +828,11 @@ class TickStore(object):
         metadata: dict
             optional user defined metadata - one per symbol
         """
-        pandas = False
+        pandas =  isinstance(data, pd.DataFrame)
+
         # Check for overlapping data
-        if isinstance(data, list):
-            start = data[0]['index']
-            end = data[-1]['index']
-        elif isinstance(data, pd.DataFrame):
-            start = data.index[0].to_pydatetime()
-            end = data.index[-1].to_pydatetime()
-            pandas = True
-        else:
-            raise UnhandledDtypeException("Can't persist type %s to tickstore" % type(data))
-        self._assert_nonoverlapping_data(symbol, to_dt(start), to_dt(end))
+        start, end = TickStore._get_time_start_end(data, self._index_precision_int)
+        self._assert_nonoverlapping_data(symbol, start, end) # TODO
 
         if pandas:
             #assert codec is None
@@ -892,7 +903,7 @@ class TickStore(object):
         elif prec == 's':
             i = 1_000_000_000  # s->ns
         elif isinstance(prec, str) and prec[0].isdigit():
-            i = np.int64(pd.to_timedelta(prec).total_seconds() * 1e9)
+            i = np.int64(pd.to_timedelta(prec).value)
             assert i > 0
         else:
             raise ValueError("unrecognized index_precision %s" % prec)
@@ -1070,6 +1081,45 @@ class TickStore(object):
 
         return enc, codec_sel, gain
 
+    @staticmethod
+    def _get_time_start_end(ticks:list|pd.DataFrame, index_precision) -> Tuple[pd.Timestamp, pd.Timestamp]:
+        assert isinstance(index_precision, (np.integer, int))
+
+        if isinstance(ticks, list) :
+            start = ticks[0]['index']
+            end = ticks[-1]['index']
+        elif isinstance(ticks, pd.DataFrame):
+            start = ticks.index[0]
+            end = ticks.index[-1]
+        else:
+            raise UnhandledDtypeException("Can't persist type %s to tickstore" % type(ticks))
+
+        ceil = lambda i: -(-np.int64(i) // np.int64(index_precision)) * np.int64(index_precision)
+        ceil_dt_utc = lambda dt: ns2dt(ceil(dt2ns(dt)), utc=True)
+
+        # assume_utc = lambda dt: dt.astimezone(TickStore.TZ_UTC) if dt.tzinfo else dt.replace(tzinfo=TickStore.TZ_UTC)
+        def to_pdts_utc(dt):
+            if isinstance(dt, (int, np.integer)):
+                # classic arctic behavior (mktz returns local tz)
+                # TODO tzinfo is actually irelevant since we are using a timestamp, which is well-defined without tz
+                return ceil_dt_utc(ms_to_datetime(dt, mktz()).astimezone(TickStore.TZ_UTC))
+            elif isinstance(dt, np.datetime64):
+                raise ValueError("passing np.datetime64 no longer supported")
+            elif dt.tzinfo is None:
+                raise ValueError("Must specify a TimeZone on incoming data")
+            elif isinstance(dt, pd.Timestamp) or isinstance(dt, datetime.datetime):
+                # before converting to pydatetime it is important to forward adjust to index resolution
+                # (otherwise we'll floor on the time axis wich we don't want)
+                # datetime.datetime has no ns resolution!
+                return ceil_dt_utc(dt.tz_convert(TickStore.TZ_UTC))
+            else:
+                raise ValueError("Unsupported datetime type: %s" % type(dt))
+
+        start = to_pdts_utc(start)
+        end = to_pdts_utc(end)
+
+        return start, end
+
     TZ_UTC = datetime.timezone.utc
 
     @staticmethod
@@ -1082,6 +1132,7 @@ class TickStore(object):
                VERSION: CHUNK_VERSION_NUMBER if is_ms and not index_vlq and not codec else CHUNK_VERSION_NUMBER + 1,
                COLUMNS: {}, COUNT: len(ticks)}
 
+        is_ms = index_precision == 1_000_000
 
         if not is_ms:
             if index_precision == 1_000_000_000:
@@ -1091,29 +1142,22 @@ class TickStore(object):
             else:
                 rtn[INDEX_PRECISION] = index_precision
 
-        if not isinstance(ticks, pd.DataFrame):
-            start:datetime.datetime= to_dt(ticks[0]['index'])
-            end: datetime.datetime = to_dt(ticks[-1]['index'])
-        else:
-            start, end = to_dt(ticks.index[0]), to_dt(ticks.index[-1])
-        assert isinstance(start, datetime.datetime) and isinstance(end, datetime.datetime)
+        start, end = TickStore._get_time_start_end(ticks, index_precision)
 
-        # this is actually not necessary, because we convert to timestamp later and store without tzinfo
-        assume_utc = lambda dt: dt.astimezone(TickStore.TZ_UTC) if dt.tzinfo else dt.replace(tzinfo=TickStore.TZ_UTC)
-        start = assume_utc(start)
-        end = assume_utc(end)
+
+        # pd.Timestamp is a reasonable timestamp format to work with here because it has ns precision
+        # and caries timezone info
+        assert isinstance(start, pd.Timestamp) and isinstance(end, pd.Timestamp)
         assert end.tzinfo == start.tzinfo == TickStore.TZ_UTC
         if start > end:
-            #print(ticks)
             raise ValueError('start %s > end %s' % (start, end))
 
-        ceil = lambda i: -(-np.int64(i) // np.int64(index_precision)) * np.int64(index_precision)
-        # todo use integer arithmetic!
-        # TODO write at test for thath
+
+        # TODO write at test for thath (failing with floats)
         #start = datetime.datetime.fromtimestamp(ceil(start.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
         #end = datetime.datetime.fromtimestamp(ceil(end.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
-        start = ns2dt(ceil(dt2ns(start)), utc=True)
-        end = ns2dt(ceil(dt2ns(end)), utc=True)
+        #start = ns2dt(ceil(dt2ns(start)), utc=True)
+        #end = ns2dt(ceil(dt2ns(end)), utc=True)
 
         #to_ns = lambda t:np.datetime64(t).astype('datetime64[ns]').astype(np.int64)
         #ns_to_dt = lambda ns, tzi: np.datetime64(int(ns), 'ns').astype(datetime.datetime).replace(tzinfo=tzi)
@@ -1134,9 +1178,12 @@ class TickStore(object):
         return rtn, index_vlq
 
     @staticmethod
-    def _to_bucket(ticks, symbol, initial_image, index_precision:str|int='ms', to_dtype=None, codec=None, verify_codec=True):
+    def _to_bucket(ticks, symbol, initial_image, index_precision:int, to_dtype=None, codec=None, verify_codec=True):
+        assert index_precision >= 1000_000
+
         rtn, index_vlq = TickStore._bucket_head(ticks, symbol, initial_image, index_precision, codec)
-        tr = [to_dt(ticks[0]['index']), to_dt(ticks[-1]['index'])]
+        #tr = [to_dt(ticks[0]['index']), to_dt(ticks[-1]['index'])]
+        tr = [rtn[START], rtn[END]]
 
         data = {}
         rowmask = {}
@@ -1150,7 +1197,15 @@ class TickStore(object):
                     if k != 'index':
                         rowmask[k][i] = 1
                     else:
-                        v = TickStore._to_ms(v)
+                        if isinstance(v, (int, np.integer)):
+                            v *= 1000_000 # ms -> ns
+                        elif isinstance(v, pd.Timestamp):
+                            v = v.value
+                        else:
+                            raise ValueError("Unsupported type %s" % type(v))
+                        v = -(-v//index_precision) * index_precision # ns ceil
+                        v //= 1000_000 # ns -> ms (we made sure index_precision<=1000_000)
+                        # v = TickStore._to_ms(v)
                         if data[k][-1] > v:
                             raise UnorderedDataException("Timestamps out-of-order: %s > %s" % (
                                 ms_to_datetime(data[k][-1]), t))
@@ -1189,12 +1244,14 @@ class TickStore(object):
             idx = np.concatenate((np.int64([data['index'][0]]), np.diff(data['index']).astype(np.int64)))
             assert index_precision >= 1_000_000
             assert (index_precision % 1_000_000) == 0
-            s = np.int64(index_precision) / 1_000_000
+            s = np.int64(index_precision) / 1000_000 # index granularity in *ms*
         if s != 1:
             assert idx.dtype == np.int64
             idx = -(-idx // s)  # causal conversion ns -> ms, s
         if idx.dtype != np.uint64:
             idx = idx.astype(np.uint64)  # TODO  use .view()
+        assert dt2ns(rtn[START])//1000_000 == idx[0] * s
+        # assert dt2ns(rtn[END])//1000_000 == sum(idx) * s
         rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
         return rtn, final_image
 
@@ -1219,12 +1276,15 @@ class TickStore(object):
             idx = -(-idx // s)  # causal conversion ns -> ms, s
 
         assert idx.dtype == np.int64
+        assert dt2ns(rtn[START]) == idx[0] * s
+        assert dt2ns(rtn[END]) == idx[-1] * s
         # internally np.diff converts to int64 and raises on overflow
         # also there is no safe check for monotony with uint64 input ?
         idx = np.diff(idx, prepend=np.int64(0))
         if  len(idx) > 1 and idx[1:].min() < 0:
             raise ValueError("non monotonic index")
         assert idx.dtype == np.int64
+
         #if idx[0] < 0:
         #    idx[0] = (2<<(64-1)) + idx[0] # equal to `idx[0].view(np.uint64)` buf faster
         #assert idx[0] >= 0
