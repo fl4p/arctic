@@ -4,6 +4,7 @@ import copy
 import datetime
 import logging
 import lzma
+import warnings
 import zlib
 from collections import defaultdict
 from datetime import datetime as dt, timedelta
@@ -475,6 +476,10 @@ class TickStore(object):
             rtn = rtn.sort_index(kind='mergesort')
         if date_range:
             # FIXME: support DateRange.interval...
+            pi =  self._index_precision_int
+            if int(date_range.end.timestamp() * 1e9) % pi or int(date_range.start.timestamp() * 1e9) % pi:
+                warnings.warn('read(): DateRange timestamps are sub index-precision %s' % (self._index_precision))
+
             rtn = rtn.loc[date_range.start:date_range.end]
         return rtn
 
