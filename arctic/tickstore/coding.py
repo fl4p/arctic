@@ -233,3 +233,41 @@ class LnQ16_zlib:
         f = np.abs(i).astype(np.float32)
         f = e_q16(f, self.loq_loss, prescale=self.loq_prescale, preadd=self.loq_preadd) * np.sign(i)
         return f
+
+
+class LnQ16:
+    """
+    * signed inputs
+    * noisy inputs with no auto-correlation
+    * int32 tobytes + zlib
+    * e.g. volume data
+    """
+
+    def __repr__(self):
+        return f'LnQ16({repr(self.comp)},{self.loq_loss},{self.loq_prescale},{self.loq_preadd})'
+
+    def __init__(self, comp, loq_loss=15, loq_prescale=37, loq_preadd=.0001):
+        self.comp = comp
+        self.loq_loss = loq_loss
+        self.loq_prescale = loq_prescale  # 2**-37 => 1e-12, generally good
+        self.loq_preadd = loq_preadd
+
+        self.rtol_reg = 1e-10  # regularization constant when computing rtol
+        self.rtol_max = 200e-6  # upper limit of rtol
+
+    def encode(self, arr):
+        i = ln_q16(np.abs(arr), self.loq_loss, self.loq_prescale, preadd=self.loq_preadd)
+        if i.min() < 0:
+            imin = np.argmin(i)
+            raise ValueError('input[%s] %s maps to %s<0!' % (imin, arr[imin], i[imin]))
+        i *= np.sign(arr)
+        buf = i.astype(np.int32).tobytes()
+        buf = binary_compressors[self.comp](buf)
+        return buf
+
+    def decode(self, buf: bytes):
+        buf = binary_decompressors[self.comp](buf)
+        i = np.frombuffer(buf, dtype=np.int32)
+        f = np.abs(i).astype(np.float32)
+        f = e_q16(f, self.loq_loss, prescale=self.loq_prescale, preadd=self.loq_preadd) * np.sign(i)
+        return f
