@@ -116,6 +116,15 @@ CHUNK_VERSION_NUMBER = 3
 CHUNK_VERSION_NUMBER_MAX = 4
 
 
+
+import warnings
+import pandas as pd
+
+# turns out that pandas 3 allows that: pd.DatetimeIndex(np.uint64(ns), tz=utc)
+warnings.filterwarnings(
+    action='ignore', category=FutureWarning,
+     message=r".*Indexing a timezone-aware DatetimeIndex with a timezone-naive datetime is deprecated and will raise KeyError in a future version.*")
+
 # version.parse(pandas.__version__) > version.parse('1.0')
 # IS_PANDAS_1x = version.parse(pandas.__version__) > version.parse('1.0')
 
@@ -337,42 +346,7 @@ class TickStore(object):
         allow_secondary = self._allow_secondary if allow_secondary is None else allow_secondary
         return ReadPreference.NEAREST if allow_secondary else ReadPreference.PRIMARY
 
-    def read(self, symbol, date_range=None, columns=None, include_images=False, allow_secondary=None,
-             _target_tick_count=0, show_progress=False):
-        """
-        Read data for the named symbol.  Returns a VersionedItem object with
-        a data and metdata element (as passed into write).
-
-        Parameters
-        ----------
-        symbol : `str`
-            symbol name for the item
-        date_range : `date.DateRange`
-            Returns ticks in the specified DateRange
-        columns : `list` of `str`
-            Columns (fields) to return from the tickstore
-        include_images : `bool`
-            Should images (/snapshots) be included in the read
-        allow_secondary : `bool` or `None`
-            Override the default behavior for allowing reads from secondary members of a cluster:
-            `None` : use the settings from the top-level `Arctic` object used to query this version store.
-            `True` : allow reads from secondary members
-            `False` : only allow reads from primary members
-
-        Returns
-        -------
-        pandas.DataFrame of data
-        """
-        perf_start = dt.now()
-        rtn = {}
-        column_set = set()
-
-        multiple_symbols = not isinstance(symbol, str)
-
-        date_range = to_pandas_closed_closed(date_range)
-        query = self._symbol_query(symbol)
-        query.update(self._mongo_date_range_query(symbol, date_range))
-
+    def _fetch_and_decode(self, symbol, date_range, columns, allow_secondary, include_images, show_progress, _target_tick_count):
         import sys
         import time
 
@@ -395,6 +369,15 @@ class TickStore(object):
                 show(i + 1)
             print("\n", flush=True, file=out)
 
+        rtn = {}
+        column_set = set()
+
+        multiple_symbols = not isinstance(symbol, str)
+
+        date_range = to_pandas_closed_closed(date_range)
+        query = self._symbol_query(symbol)
+        query.update(self._mongo_date_range_query(symbol, date_range))
+
         if columns:
             projection = dict([(SYMBOL, 1),
                                (INDEX, 1),
@@ -414,6 +397,8 @@ class TickStore(object):
                                (IMAGE_DOC, 1)])
 
         column_dtypes = {}
+
+
         ticks_read = 0
         bytes_i = 0  # compressed index size
         bytes_d = 0
@@ -445,11 +430,56 @@ class TickStore(object):
 
         self.last_read_bytes = bytes_i, bytes_d, bytes_m
 
+
+        return rtn, column_dtypes
+
+    def read(self, symbol, date_range=None, columns=None, include_images=False, allow_secondary=None,
+             _target_tick_count=0, show_progress=False):
+        """
+        Read data for the named symbol.  Returns a VersionedItem object with
+        a data and metdata element (as passed into write).
+
+        Parameters
+        ----------
+        symbol : `str`
+            symbol name for the item
+        date_range : `date.DateRange`
+            Returns ticks in the specified DateRange
+        columns : `list` of `str`
+            Columns (fields) to return from the tickstore
+        include_images : `bool`
+            Should images (/snapshots) be included in the read
+        allow_secondary : `bool` or `None`
+            Override the default behavior for allowing reads from secondary members of a cluster:
+            `None` : use the settings from the top-level `Arctic` object used to query this version store.
+            `True` : allow reads from secondary members
+            `False` : only allow reads from primary members
+
+        Returns
+        -------
+        pandas.DataFrame of data
+        """
+        perf_start = dt.now()
+
+        date_range = to_pandas_closed_closed(date_range)
+
+
+        rtn, column_dtypes = self._fetch_and_decode(symbol, date_range, columns, include_images, allow_secondary,
+                    show_progress=show_progress,
+                    _target_tick_count=_target_tick_count)
+
         if not rtn:
             raise NoDataFoundException("No Data found for {} in range: {}".format(symbol, date_range))
+
+        multiple_symbols = not isinstance(symbol, str)
+
         rtn = self._pad_and_fix_dtypes(rtn, column_dtypes)
 
-        index = pd.to_datetime(np.concatenate(rtn[INDEX]), utc=True, unit='ms')
+        #index = pd.to_datetime(np.concatenate(rtn[INDEX]), utc=True, unit='ms') # TODO fix takes long
+        idx_ns = np.concatenate(rtn[INDEX]) * np.int64(1000_000)
+        index = pd.DatetimeIndex(idx_ns, tz=datetime.timezone.utc) # this is zero cost!
+        # and we already validated our index during write
+
         if columns is None:
             columns = [x for x in rtn.keys() if x not in (INDEX, 'SYMBOL')]
         if multiple_symbols and 'SYMBOL' not in columns:
@@ -488,14 +518,37 @@ class TickStore(object):
         if not rtn.index.is_monotonic_increasing:
             logger.error("TimeSeries data is out of order, sorting!")
             rtn = rtn.sort_index(kind='mergesort')
+            assert False
+
         if date_range:
             # FIXME: support DateRange.interval...
             pi =  self._index_precision_int
             if dt2ns(date_range.end) % pi or dt2ns(date_range.start) % pi:
                 warnings.warn('read(): DateRange timestamps are sub index-precision %s' % (self._index_precision))
+            #if date_range.start > index[0] and date_range.end < index[-1]:
+            #rtn1 = rtn.loc[date_range.start:date_range.end] # this is very sloooow
+            #rtn = TickStore._fast_time_slice(rtn, date_range.start, date_range.end)
+            istart = np.searchsorted(idx_ns, dt2ns(date_range.start), side='left')
+            iend = np.searchsorted(idx_ns, dt2ns(date_range.end), side='right')
+            #istart = np.searchsorted(rtn.index, (date_range.start), side='left')
+            #iend = np.searchsorted(rtn.index, (date_range.end), side='right')
+            rtn = rtn.iloc[istart:iend]# this is fast
 
-            rtn = rtn.loc[date_range.start:date_range.end]
+            #assert len(rtn1) == len(rtn)
+            #assert rtn1.index[0] ==rtn.index[0], (rtn1.index, rtn.index)
+            #assert (rtn1.index == rtn.index).all()
+            # pd.testing.assert_frame_equal(rtn1, rtn, check_exact=True)
+
         return rtn
+
+    @staticmethod
+    def _fast_time_slice(df, index_start, index_end):
+        idx_ns = index_to_ns(df, np.int64)
+        istart = np.searchsorted(idx_ns, dt2ns(index_start), side='left')
+        iend = np.searchsorted(idx_ns, dt2ns(index_end), side='right')
+        #istart = np.searchsorted(df.index, index_start, side='left')
+        #iend = np.searchsorted(df.index, index_end, side='right')
+        return df.iloc[istart:iend]
 
     def read_metadata(self, symbol):
         """
@@ -1050,8 +1103,9 @@ class TickStore(object):
         start = assume_utc(start)
         end = assume_utc(end)
         assert end.tzinfo == start.tzinfo == TickStore.TZ_UTC
-        if not (start < end):
-            raise ValueError('start >= end')
+        if start > end:
+            #print(ticks)
+            raise ValueError('start %s > end %s' % (start, end))
 
         ceil = lambda i: -(-np.int64(i) // np.int64(index_precision)) * np.int64(index_precision)
         # todo use integer arithmetic!
@@ -1150,7 +1204,7 @@ class TickStore(object):
         rtn, index_vlq = TickStore._bucket_head(df, symbol, initial_image, index_precision, codec)
         tr = [to_dt(df.index[0]), to_dt(df.index[-1])]
 
-        assert len(df) > 1, len(df)
+        #assert len(df) > 1, len(df)
 
         assert not initial_image
 
@@ -1168,7 +1222,7 @@ class TickStore(object):
         # internally np.diff converts to int64 and raises on overflow
         # also there is no safe check for monotony with uint64 input ?
         idx = np.diff(idx, prepend=np.int64(0))
-        if  idx[1:].min() < 0:
+        if  len(idx) > 1 and idx[1:].min() < 0:
             raise ValueError("non monotonic index")
         assert idx.dtype == np.int64
         #if idx[0] < 0:
