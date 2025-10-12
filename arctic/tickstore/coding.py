@@ -133,7 +133,10 @@ class LnQ16_VQL():
         # of lz4 as compared to zlib does not matter
     """
 
-    def __init__(self, comp='lz4', loq_loss=25, log_prescale=37,loq_preadd=.0001):
+    def __repr__(self):
+        return f'LnQ16_VQL({repr(self.comp)}, {self.loq_loss}, {self.loq_prescale}, {self.loq_preadd})'
+
+    def __init__(self, comp='lz4', loq_loss=25, log_prescale=37, loq_preadd=.0001):
         """
 
         Parameters

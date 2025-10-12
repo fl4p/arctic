@@ -130,14 +130,14 @@ def register_codec(name, obj):
     assert len(name) < 16
     codec_registry[name] = obj
 
-LnQ25VQLgz = LnQ16_VQL(loq_loss=25, comp='zlib')
+LnQ25VQLgz = LnQ16_VQL(loq_loss=25, comp='gz')
 register_codec('LnQ25VQLgz',LnQ25VQLgz) # for l2 data, general purpose [1e-13, 2e+27]
 register_codec('LnQ15VQLlz4', LnQ16_VQL(loq_loss=15, comp='lz4')) # for price data, fast
 register_codec('LnQ15gz', LnQ16_zlib(loq_loss=15)) # for signed trade qty, no VQL (no auto-corr)
 # TODO like LnQ25VQLgz but smaller prescale to trade small number precision for bigger range (up to 2e35 or so)
 # this one: LnQ16_VQL(loq_loss=25, comp='zlib', log_prescale=24, loq_preadd=1e-8)
 
-LnQ20VQLgz = LnQ16_VQL(loq_loss=20, comp='zlib', log_prescale=20, loq_preadd=1e-12)
+LnQ20VQLgz = LnQ16_VQL(loq_loss=20, comp='gz', log_prescale=20, loq_preadd=1e-12)
 register_codec('LnQ20VQLgz', LnQ20VQLgz) # for l2 data, general purpose [1e-15, 2e+32]
 
 def index_to_ns(series, dtype):
