@@ -21,7 +21,7 @@ from pymongo.errors import OperationFailure
 from pymongo.results import InsertManyResult
 
 from .coding import nparray_varint_encode, nparray_varint_decode, encode_logQ16_10_dzv, decode_logQ16_10_dzv, \
-    LnQ16_VQL, LnQ16_zlib, binary_compressors
+    LnQ16_VQL, LnQ16_zlib, binary_compressors, LnQ16
 
 try:
     from pandas.core.frame import _arrays_to_mgr
@@ -140,6 +140,9 @@ register_codec('LnQ15gz', LnQ16_zlib(loq_loss=15)) # for signed trade qty, no VQ
 
 LnQ20VQLgz = LnQ16_VQL(loq_loss=20, comp='gz', log_prescale=20, loq_preadd=1e-12)
 register_codec('LnQ20VQLgz', LnQ20VQLgz) # for l2 data, general purpose [1e-15, 2e+32]
+
+register_codec('LnQ15br9', LnQ16('br_9', 15)) # for qty, 115ppm
+register_codec('LnQ185VQLgz', LnQ16_VQL('gz', 1.85, 0, 0)) # for px 16ppm
 
 def index_to_ns(series, dtype):
     try:
@@ -794,6 +797,7 @@ class TickStore(object):
         self.last_write_bytes_per_col = TickStore._get_buckets_size_by_col(buckets)
         self.last_write_bytes = TickStore._get_buckets_size_stats_idm(buckets)
 
+        # this goes to pymong.bulk._execute_command
         res: InsertManyResult = mongo_retry(self._collection.insert_many)(buckets)
         assert res.acknowledged
         assert len(res.inserted_ids) == len(buckets)
@@ -1160,13 +1164,7 @@ class TickStore(object):
         idx = idx.view(np.uint64) # no cost O(0)
 
 
-
-        compressor = dict(
-            lz4=lz4_compressHC,
-            gz=zlib.compress, #partial(zlib.compress, wbits=15),
-            lzma=lambda d: lzma.compress(d, format=lzma.FORMAT_ALONE, preset=lzma.PRESET_EXTREME),
-            n=lambda d: d,
-        ).get(index_compressor)
+        compressor = binary_compressors.get(index_compressor)
         assert compressor is not None, ("unknown compressor %s" % index_compressor)
         if index_compressor != 'lz4':
             assert INDEX_COMPRESSION not in rtn
