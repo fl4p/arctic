@@ -323,7 +323,7 @@ class TickStore(object):
         return ReadPreference.NEAREST if allow_secondary else ReadPreference.PRIMARY
 
     def read(self, symbol, date_range=None, columns=None, include_images=False, allow_secondary=None,
-             _target_tick_count=0):
+             _target_tick_count=0, show_progress=False):
         """
         Read data for the named symbol.  Returns a VersionedItem object with
         a data and metdata element (as passed into write).
@@ -358,6 +358,28 @@ class TickStore(object):
         query = self._symbol_query(symbol)
         query.update(self._mongo_date_range_query(symbol, date_range))
 
+        import sys
+        import time
+
+        def progressbar(it, count=None, prefix="", size=60, out=sys.stdout):  # Python3.6+
+            count = count or len(it)
+            start = time.time()  # time estimate start
+
+            def show(j):
+                x = int(size * j / count)
+                # time estimate calculation and string
+                remaining = ((time.time() - start) / j) * (count - j)
+                mins, sec = divmod(remaining, 60)  # limited to minutes
+                time_str = f"{int(mins):02}:{sec:03.1f}"
+                print(f" [{u'█' * x}{('.' * (size - x))}] {prefix} {j}/{count} Est wait {time_str}", end='\r', file=out,
+                      flush=True)
+
+            #show(0.1)  # avoid div/0
+            for i, item in enumerate(it):
+                yield item
+                show(i + 1)
+            print("\n", flush=True, file=out)
+
         if columns:
             projection = dict([(SYMBOL, 1),
                                (INDEX, 1),
@@ -382,7 +404,13 @@ class TickStore(object):
         bytes_d = 0
         bytes_m = 0
         data_coll = self._collection.with_options(read_preference=self._read_preference(allow_secondary))
-        for b in data_coll.find(query, projection=projection).sort([(START, pymongo.ASCENDING)], ):
+
+        cursor = data_coll.find(query, projection=projection).sort([(START, pymongo.ASCENDING)], )
+        if show_progress:
+            num = data_coll.count(query)
+            if num > 20:
+                cursor = progressbar(cursor, prefix=symbol, count=num)
+        for b in cursor:
             data = self._read_bucket(b, column_set, column_dtypes,
                                      multiple_symbols or (columns is not None and 'SYMBOL' in columns),
                                      include_images, columns)
