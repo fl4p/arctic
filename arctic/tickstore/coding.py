@@ -149,9 +149,9 @@ class LnQ16_VQL():
         self.delta_order = 1
         self.loq_loss = loq_loss
         self.loq_prescale = log_prescale  # 2**-37 => 1e-12, generally good, overflow at 2.2e+27
-        self.loq_preadd =loq_preadd
+        self.loq_preadd = loq_preadd
 
-        assert comp in {'lz4', 'zlib'}
+        assert comp in binary_decompressors and comp in binary_compressors, comp
         self.comp = comp
 
         self.rtol_reg = 1e-10  # regularization constant when computing rtol
@@ -172,14 +172,13 @@ class LnQ16_VQL():
         for _ in range(self.delta_order):
             i = np.diff(i, prepend=np.int64(0))
         zigzag_encode_inplace(i)
-        assert i.min() >= 0, (np.argmin(i), i.min(), arr[np.argmin(i)-1:np.argmin(i)+1])
+        assert i.min() >= 0, (np.argmin(i), i.min(), arr[np.argmin(i) - 1:np.argmin(i) + 1])
         buf = nparray_varint_encode(i.astype(np.uint64))
-        buf = lz4_compressHC(buf) if self.comp == 'lz4' else zlib.compress(buf)  # using lz4 here for fast retrieval
-
+        buf = binary_compressors.get(self.comp)(buf)
         return buf
 
     def decode(self, buf):
-        buf = lz4_decompress(buf) if self.comp == 'lz4' else zlib.decompress(buf)
+        buf = binary_decompressors.get(self.comp)(buf)
         i = nparray_varint_decode(buf)
         zigzag_decode_inplace(i)
         for _ in range(self.delta_order):
