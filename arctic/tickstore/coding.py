@@ -78,7 +78,7 @@ LOQ_PREADD = .0001
 
 def ln_q16(x, loss=15, prescale=LOQ_PRESCALE, preadd=LOQ_PREADD):
     ft = np.float32
-    assert x.dtype == ft
+    assert x.dtype == ft, x.dtype
     s = ft(2 ** prescale)
     o = ft(preadd)
     if s == 1 and o == 0:

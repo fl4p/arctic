@@ -141,7 +141,7 @@ register_codec('LnQ15gz', LnQ16_zlib(loq_loss=15)) # for signed trade qty, no VQ
 LnQ20VQLgz = LnQ16_VQL(loq_loss=20, comp='gz', log_prescale=20, loq_preadd=1e-12)
 register_codec('LnQ20VQLgz', LnQ20VQLgz) # for l2 data, general purpose [1e-15, 2e+32]
 
-register_codec('LnQ15br9', LnQ16('br_9', 15)) # for qty, 115ppm
+register_codec('LnQ15br9', LnQ16('br_9', 15)) # for qty, 115ppm, abs(x) >= 0.73e-11
 register_codec('LnQ185VQLgz', LnQ16_VQL('gz', 1.85, 0, 0)) # for px 16ppm
 
 def index_to_ns(series, dtype):
@@ -155,6 +155,17 @@ def index_to_ns(series, dtype):
     except TypeError:
         # python 0.x
         return series.index.tz_convert('UTC').tz_localize(None).values.astype('datetime64[ns]').astype(dtype)
+
+def dt2ns(dt):
+    # TODO view?
+    if dt.tzinfo:
+        dt = dt.astimezone(TickStore.TZ_UTC).replace(tzinfo=None) # todo test
+    return np.datetime64(dt).astype('datetime64[ns]').astype(np.int64)
+
+def ns2dt(ns, **kwargs):
+    return pd.to_datetime(ns, unit='ns', **kwargs)
+    # return pd.to_datetime(ns, unit='ns')
+    #datetime.datetime.fromtimestamp(ceil(start.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
 
 class TickStore(object):
 
@@ -480,7 +491,7 @@ class TickStore(object):
         if date_range:
             # FIXME: support DateRange.interval...
             pi =  self._index_precision_int
-            if int(date_range.end.timestamp() * 1e9) % pi or int(date_range.start.timestamp() * 1e9) % pi:
+            if dt2ns(date_range.end) % pi or dt2ns(date_range.start) % pi:
                 warnings.warn('read(): DateRange timestamps are sub index-precision %s' % (self._index_precision))
 
             rtn = rtn.loc[date_range.start:date_range.end]
@@ -724,7 +735,7 @@ class TickStore(object):
                 start = start.replace(tzinfo=mktz('UTC'))
             if doc[END] > start:
                 raise OverlappingDataException(
-                    "Document already exists with start:{} end:{} in the range of our start:{} end:{}".format(
+                    symbol+ " Document already exists with start:{} end:{} in the range of our start:{} end:{}".format(
                         doc[START], doc[END], start, end))
 
     def write(self, symbol, data, initial_image=None, metadata=None, to_dtype=None, codec=None):
@@ -1043,8 +1054,12 @@ class TickStore(object):
             raise ValueError('start >= end')
 
         ceil = lambda i: -(-np.int64(i) // np.int64(index_precision)) * np.int64(index_precision)
-        start = datetime.datetime.fromtimestamp(ceil(start.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
-        end = datetime.datetime.fromtimestamp(ceil(end.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
+        # todo use integer arithmetic!
+        # TODO write at test for thath
+        #start = datetime.datetime.fromtimestamp(ceil(start.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
+        #end = datetime.datetime.fromtimestamp(ceil(end.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
+        start = ns2dt(ceil(dt2ns(start)), utc=True)
+        end = ns2dt(ceil(dt2ns(end)), utc=True)
 
         #to_ns = lambda t:np.datetime64(t).astype('datetime64[ns]').astype(np.int64)
         #ns_to_dt = lambda ns, tzi: np.datetime64(int(ns), 'ns').astype(datetime.datetime).replace(tzinfo=tzi)
