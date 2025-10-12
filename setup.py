@@ -64,7 +64,7 @@ extensions = [
 
 setup(
     name="arctic",
-    version="1.84.0",
+    version="1.84.1",
     author="Man AHL Technology",
     author_email="arctic@man.com",
     description=("AHL Research Versioned TimeSeries and Tick store"),
@@ -88,8 +88,8 @@ setup(
                       "pymongo>=3.6.0, <= 3.11.0",
                       "pytz",
                       "tzlocal",
-                      "lz4",
-                     # "cython", # tickstore.coding
+                      "lz4", "brotli","lz4",
+                      "Cython", # tickstore.coding
                      ],
     # Note: pytest >= 4.1.0 is not compatible with pytest-cov < 2.6.1.
     # deprecated
