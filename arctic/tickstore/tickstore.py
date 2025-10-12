@@ -20,7 +20,7 @@ from pymongo.errors import OperationFailure
 from pymongo.results import InsertManyResult
 
 from .coding import nparray_varint_encode, nparray_varint_decode, encode_logQ16_10_dzv, decode_logQ16_10_dzv, \
-    LnQ16_VQL, LnQ16_zlib
+    LnQ16_VQL, LnQ16_zlib, binary_compressors
 
 try:
     from pandas.core.frame import _arrays_to_mgr

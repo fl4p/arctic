@@ -1,7 +1,9 @@
 import io
+import lzma
 import math
 import zlib
 
+import brotli
 import numpy as np
 import pandas as pd
 
@@ -77,7 +79,12 @@ LOQ_PREADD = .0001
 def ln_q16(x, loss=15, prescale=LOQ_PRESCALE, preadd=LOQ_PREADD):
     ft = np.float32
     assert x.dtype == ft
-    f = np.round(np.log(x * ft(2 ** prescale) + ft(preadd)) * ft(2 ** 16 / loss))
+    s = ft(2 ** prescale)
+    o = ft(preadd)
+    if s == 1 and o == 0:
+        f = np.round(np.log(x) * ft(2 ** 16 / loss))
+    else:
+        f = np.round(np.log(x * s + o) * ft(2 ** 16 / loss))
     assert f.dtype == ft
     return f
 
@@ -85,7 +92,32 @@ def ln_q16(x, loss=15, prescale=LOQ_PRESCALE, preadd=LOQ_PREADD):
 def e_q16(x, loss=15, prescale=LOQ_PRESCALE, preadd=LOQ_PREADD):
     # e^x is faster than 10^x (and 2^x on some machines/older numpy?)!
     assert x.dtype == np.float32, x.dtype
-    return (np.exp(x / np.float32(2 ** 16 / loss)) - np.float32(preadd)) / np.float32(2 ** prescale)
+    if prescale == 0 and preadd == 0:
+        return np.exp(x / np.float32(2 ** 16 / loss))
+    else:
+        return (np.exp(x / np.float32(2 ** 16 / loss)) - np.float32(preadd)) / np.float32(2 ** prescale)
+
+
+binary_compressors = dict(
+    n=lambda d: d,
+    lz4=lz4_compressHC,  # fast retrieval
+    gz=zlib.compress,  # partial(zlib.compress, wbits=15),
+    # sgz_=partial(zlib.compress, wbits=15),
+    lzma=lambda d: lzma.compress(d, format=lzma.FORMAT_ALONE, preset=lzma.PRESET_EXTREME),
+    br_9=lambda d: brotli.compress(d, quality=9, mode=brotli.MODE_FONT),
+    br_10=lambda d: brotli.compress(d, quality=10),
+    br=lambda d: brotli.compress(d, quality=11),  #default q=11
+)
+
+binary_decompressors = dict(
+    n=lambda d: d,
+    lz4=lz4_decompress,  # fast retrieval
+    gz=zlib.decompress,  # partial(zlib.compress, wbits=15),
+    lzma=lambda d: lzma.decompress(d, format=lzma.FORMAT_ALONE),
+    br_9=lambda d: brotli.decompress(d),
+    br_10=lambda d: brotli.decompress(d),
+    br=lambda d: brotli.decompress(d),
+)
 
 
 class LnQ16_VQL():
