@@ -206,10 +206,13 @@ class LnQ16_zlib:
     * e.g. volume data
     """
 
-    def __init__(self, loq_loss=15):
+    def __repr__(self):
+        return f'LnQ16_zlib({self.loq_loss},{self.loq_prescale},{self.loq_preadd})'
+
+    def __init__(self, loq_loss=15, loq_prescale=37, loq_preadd=.0001):
         self.loq_loss = loq_loss
-        self.loq_prescale = 37  # 2**-37 => 1e-12, generally good
-        self.loq_preadd = .0001
+        self.loq_prescale = loq_prescale  # 2**-37 => 1e-12, generally good
+        self.loq_preadd = loq_preadd
 
         self.rtol_reg = 1e-10  # regularization constant when computing rtol
         self.rtol_max = 200e-6  # upper limit of rtol
