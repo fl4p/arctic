@@ -3,18 +3,13 @@ from __future__ import print_function, annotations
 import copy
 import datetime
 import logging
-import lzma
-import warnings
-import zlib
+import pickle
 from collections import defaultdict
 from datetime import datetime as dt, timedelta
-from functools import partial
 
-import lz4
 import numpy as np
 import pandas as pd
 import pymongo
-import pytz
 from bson.binary import Binary
 from pymongo import ReadPreference
 from pymongo.errors import OperationFailure
@@ -44,7 +39,8 @@ from .._util import indent
 try:
     from lz4.block import compress as lz4_compress, decompress as lz4_decompress
 
-    def lz4_compressHC(_str): # ordinary function so name appears in profile
+
+    def lz4_compressHC(_str):  # ordinary function so name appears in profile
         return lz4_compress(_str, mode='high_compression')
 except ImportError as e:
     from lz4 import compress as lz4_compress, compressHC as lz4_compressHC, decompress as lz4_decompress
@@ -115,21 +111,20 @@ META = 'md'
 CHUNK_VERSION_NUMBER = 3
 CHUNK_VERSION_NUMBER_MAX = 4
 
-
-
 import warnings
 import pandas as pd
 
 # turns out that pandas 3 allows that: pd.DatetimeIndex(np.uint64(ns), tz=utc)
 warnings.filterwarnings(
     action='ignore', category=FutureWarning,
-     message=r".*Indexing a timezone-aware DatetimeIndex with a timezone-naive datetime is deprecated and will raise KeyError in a future version.*")
+    message=r".*Indexing a timezone-aware DatetimeIndex with a timezone-naive datetime is deprecated and will raise KeyError in a future version.*")
 
 # version.parse(pandas.__version__) > version.parse('1.0')
 # IS_PANDAS_1x = version.parse(pandas.__version__) > version.parse('1.0')
 
 
 codec_registry = {}
+
 
 def register_codec(name, obj):
     assert hasattr(obj, 'encode') and callable(obj.encode)
@@ -140,18 +135,20 @@ def register_codec(name, obj):
     assert len(name) < 16
     codec_registry[name] = obj
 
+
 LnQ25VQLgz = LnQ16_VQL(loq_loss=25, comp='gz')
-register_codec('LnQ25VQLgz',LnQ25VQLgz) # for l2 data, general purpose [1e-13, 2e+27]
-register_codec('LnQ15VQLlz4', LnQ16_VQL(loq_loss=15, comp='lz4')) # for price data, fast
-register_codec('LnQ15gz', LnQ16_zlib(loq_loss=15)) # for signed trade qty, no VQL (no auto-corr)
+register_codec('LnQ25VQLgz', LnQ25VQLgz)  # for l2 data, general purpose [1e-13, 2e+27]
+register_codec('LnQ15VQLlz4', LnQ16_VQL(loq_loss=15, comp='lz4'))  # for price data, fast
+register_codec('LnQ15gz', LnQ16_zlib(loq_loss=15))  # for signed trade qty, no VQL (no auto-corr)
 # TODO like LnQ25VQLgz but smaller prescale to trade small number precision for bigger range (up to 2e35 or so)
 # this one: LnQ16_VQL(loq_loss=25, comp='zlib', log_prescale=24, loq_preadd=1e-8)
 
 LnQ20VQLgz = LnQ16_VQL(loq_loss=20, comp='gz', log_prescale=20, loq_preadd=1e-12)
-register_codec('LnQ20VQLgz', LnQ20VQLgz) # for l2 data, general purpose [1e-15, 2e+32]
+register_codec('LnQ20VQLgz', LnQ20VQLgz)  # for l2 data, general purpose [1e-15, 2e+32]
 
-register_codec('LnQ15br9', LnQ16('br_9', 15)) # for qty, 115ppm, abs(x) >= 0.73e-11
-register_codec('LnQ185VQLgz', LnQ16_VQL('gz', 1.85, 0, 0)) # for px 16ppm
+register_codec('LnQ15br9', LnQ16('br_9', 15))  # for qty, 115ppm, abs(x) >= 0.73e-11
+register_codec('LnQ185VQLgz', LnQ16_VQL('gz', 1.85, 0, 0))  # for px 16ppm
+
 
 def index_to_ns(series, dtype):
     try:
@@ -165,9 +162,10 @@ def index_to_ns(series, dtype):
         # python 0.x
         return series.index.tz_convert('UTC').tz_localize(None).values.astype('datetime64[ns]').astype(dtype)
 
+
 def dt2ns(dt):
     if isinstance(dt, pd.Timestamp):
-        return dt.value # int
+        return dt.value  # int
     elif isinstance(dt, np.datetime64):
         return dt.astype('datetime64[ns]').view(int)
     elif isinstance(dt, datetime.datetime):
@@ -175,8 +173,10 @@ def dt2ns(dt):
     else:
         raise TypeError('dt must be pd.Timestamp or np.datetime64 or datetime.datetime')
 
+
 def ns2dt(ns, **kwargs):
     return pd.to_datetime(ns, unit='ns', **kwargs)
+
 
 class TickStore(object):
 
@@ -188,8 +188,9 @@ class TickStore(object):
     def _ensure_index(self):
         collection = self._collection
         collection.create_index([(SYMBOL, pymongo.ASCENDING),
-                                 (START, pymongo.ASCENDING)], background=True)
+                                 (START, pymongo.ASCENDING)], background=True) # this can be made unique
         collection.create_index([(START, pymongo.ASCENDING)], background=True)
+        collection.create_index([(END, pymongo.ASCENDING)], background=True)
 
         self._metadata.create_index([(SYMBOL, pymongo.ASCENDING)], background=True, unique=True)
 
@@ -207,7 +208,7 @@ class TickStore(object):
         # Do we allow reading from secondaries
         self._allow_secondary = self._arctic_lib.arctic._allow_secondary
         self._chunk_size = chunk_size
-        #assert index_precision in ('ms', 's')
+        # assert index_precision in ('ms', 's')
         self._index_precision = index_precision
         self._verify_codec = verify_codec
         self._reset()
@@ -219,11 +220,13 @@ class TickStore(object):
         self._metadata = self._collection.metadata
 
     def __getstate__(self):
-        return {'arctic_lib': self._arctic_lib, 'chunk_size': self._chunk_size, 'index_precision': self._index_precision,
+        return {'arctic_lib': self._arctic_lib, 'chunk_size': self._chunk_size,
+                'index_precision': self._index_precision,
                 'verify_codec': self._verify_codec}
 
     def __setstate__(self, state):
-        return TickStore.__init__(self, state['arctic_lib'], chunk_size=state['chunk_size'], index_precision=state['index_precision'],
+        return TickStore.__init__(self, state['arctic_lib'], chunk_size=state['chunk_size'],
+                                  index_precision=state['index_precision'],
                                   verify_codec=state['verify_codec'])
 
     def __str__(self):
@@ -348,7 +351,8 @@ class TickStore(object):
         allow_secondary = self._allow_secondary if allow_secondary is None else allow_secondary
         return ReadPreference.NEAREST if allow_secondary else ReadPreference.PRIMARY
 
-    def _fetch_and_decode(self, symbol, date_range, columns, allow_secondary, include_images, show_progress, _target_tick_count):
+    def _fetch_and_decode(self, symbol, date_range, columns, allow_secondary, include_images, show_progress,
+                          _target_tick_count):
         import sys
         import time
 
@@ -365,7 +369,7 @@ class TickStore(object):
                 print(f" [{u'█' * x}{('.' * (size - x))}] {prefix} {j}/{count} Est wait {time_str}", end='\r', file=out,
                       flush=True)
 
-            #show(0.1)  # avoid div/0
+            # show(0.1)  # avoid div/0
             for i, item in enumerate(it):
                 yield item
                 show(i + 1)
@@ -402,7 +406,6 @@ class TickStore(object):
 
         column_dtypes = {}
 
-
         ticks_read = 0
         bytes_i = 0  # compressed index size
         bytes_d = 0
@@ -410,14 +413,60 @@ class TickStore(object):
         data_coll = self._collection.with_options(read_preference=self._read_preference(allow_secondary))
 
         cursor = data_coll.find(query, projection=projection).sort([(START, pymongo.ASCENDING)], )
+        num = data_coll.count(query)
         if show_progress:
-            num = data_coll.count(query)
+            #num = data_coll.count(query)
             if num > 20:
                 cursor = progressbar(cursor, prefix=symbol, count=num)
-        for b in cursor:
-            data = self._decode_bucket(b, column_set, column_dtypes,
+
+        buckets = []
+        for doc in cursor:
+            assert doc[SYMBOL] == symbol
+            data = self._decode_bucket(doc, column_set, column_dtypes,
                                        multiple_symbols or (columns is not None and 'SYMBOL' in columns),
                                        include_images, columns)
+            buckets.append(data)
+            bytes_i += len(doc[INDEX])
+            bytes_d += sum(len(c[DATA]) for c in doc[COLUMNS].values())
+            bytes_m += sum(len(c[ROWMASK]) for c in doc[COLUMNS].values())
+
+        assert len(buckets) == num
+
+        # sort buckets in case they arrived out-of-order (might happen with multiprocessing)
+        # buckets = sorted(buckets, key=lambda b: b[INDEX][0])
+
+        t = -(2 << 62)  # int64 min
+        for data in buckets:
+            # check for overlapping blocks
+            if len(data[INDEX]) == 0:
+                assert not data.get(ROWMASK)
+                assert not data.get(COLUMNS)
+                continue
+            if data[INDEX][0] < t:
+                print(self._arctic_lib, symbol, '\noverlapping blocks=[\n')
+                print(',\n'.join(([repr(ms_to_iso((b[INDEX][0], b[INDEX][-1]))) for b in buckets]))+']')
+
+                grouped = defaultdict(list)
+                for b in buckets:
+                    grouped[(b[INDEX][0], b[INDEX][-1])].append(b)
+
+                b2 = list(data_coll.find(query, projection={"_id":1,"s":1}).sort([(START, pymongo.ASCENDING)], ))
+                print(b2)
+
+                print('grouped:')
+                for (s,e), g in grouped.items():
+                    print(s,e, len(g)) # TODO _id
+                for (s,e), g in grouped.items():
+                    for b in g[1:]:
+                        assert (b[INDEX] == g[0][INDEX]).all()
+                        assert b.keys() == g[0].keys()
+                        assert pickle.dumps(b) == pickle.dumps(g[0])
+
+                raise ValueError('overlap block: prev ends at %s, curr start at %s' % ms_to_iso((t, data[INDEX][0])))
+
+            assert data[INDEX][0] <= data[INDEX][-1]
+            t = data[INDEX][-1]
+
             for k, v in data.items():
                 try:
                     rtn[k].append(v)
@@ -426,15 +475,11 @@ class TickStore(object):
 
             # For testing
             ticks_read += len(data[INDEX])
-            bytes_i += len(b['i'])
-            bytes_d += sum(len(c['d']) for c in b['cs'].values())
-            bytes_m += sum(len(c['m']) for c in b['cs'].values())
 
             if _target_tick_count and ticks_read > _target_tick_count:
                 break
 
         self.last_read_bytes = bytes_i, bytes_d, bytes_m
-
 
         return rtn, column_dtypes
 
@@ -468,21 +513,22 @@ class TickStore(object):
 
         date_range = to_pandas_closed_closed(date_range)
 
-
         rtn, column_dtypes = self._fetch_and_decode(symbol, date_range, columns, include_images, allow_secondary,
-                    show_progress=show_progress,
-                    _target_tick_count=_target_tick_count)
+                                                    show_progress=show_progress,
+                                                    _target_tick_count=_target_tick_count)
 
         if not rtn:
             raise NoDataFoundException("No Data found for {} in range: {}".format(symbol, date_range))
 
         multiple_symbols = not isinstance(symbol, str)
 
+        # sort buckets in case they arrived out of order
+
         rtn = self._pad_and_fix_dtypes(rtn, column_dtypes)
 
-        #index = pd.to_datetime(np.concatenate(rtn[INDEX]), utc=True, unit='ms') # TODO fix takes long
+        # index = pd.to_datetime(np.concatenate(rtn[INDEX]), utc=True, unit='ms') # TODO fix takes long
         idx_ns = np.concatenate(rtn[INDEX]) * np.int64(1000_000)
-        index = pd.DatetimeIndex(idx_ns, tz=datetime.timezone.utc) # this is zero cost!
+        index = pd.DatetimeIndex(idx_ns, tz=datetime.timezone.utc)  # this is zero cost!
         # and we already validated our index during write
 
         if columns is None:
@@ -503,14 +549,14 @@ class TickStore(object):
         t = (dt.now() - perf_start).total_seconds()
         logger.info("Got data in %s secs, creating DataFrame..." % t)
         if pd.__version__.startswith("0.") or pd.__version__.startswith("1."):
-            if  pd.__version__.startswith("1."):
+            if pd.__version__.startswith("1."):
                 mgr = _arrays_to_mgr(arrays, columns, index, dtype=None, typ='block')
             else:
                 mgr = _arrays_to_mgr(arrays, columns, index, columns, dtype=None)
         else:
             # if pd.__version__
             # new argument typ is mandatory            
-            mgr = _arrays_to_mgr(arrays, columns, index, dtype=None, typ="block") # TODO array ?
+            mgr = _arrays_to_mgr(arrays, columns, index, dtype=None, typ="block")  # TODO array ?
 
         rtn = pd.DataFrame(mgr)
         # Present data in the user's default TimeZone
@@ -523,28 +569,28 @@ class TickStore(object):
         if not rtn.index.is_monotonic_increasing:
             print('non monotonic increasing index')
             nmi = np.argmin(np.diff(rtn.index.values))
-            print('non monotonicy here:\n' + ('\n'.join(map(str, rtn.index.values[nmi-2:nmi+10]))))
-            assert False, (symbol, rtn.index.values[nmi-2:nmi+2])
+            print('non monotonicy here:\n' + ('\n'.join(map(str, rtn.index.values[nmi - 2:nmi + 10]))))
+            assert False, (symbol, rtn.index.values[nmi - 2:nmi + 2])
             logger.error("TimeSeries data is out of order, sorting!")
             rtn = rtn.sort_index(kind='mergesort')
 
         if date_range:
             # FIXME: support DateRange.interval...
-            pi =  self._index_precision_int
+            pi = self._index_quant_ns
             if dt2ns(date_range.end) % pi or dt2ns(date_range.start) % pi:
                 warnings.warn('read(): DateRange timestamps are sub index-precision %s' % (self._index_precision))
-            #if date_range.start > index[0] and date_range.end < index[-1]:
-            #rtn1 = rtn.loc[date_range.start:date_range.end] # this is very sloooow
-            #rtn = TickStore._fast_time_slice(rtn, date_range.start, date_range.end)
+            # if date_range.start > index[0] and date_range.end < index[-1]:
+            # rtn1 = rtn.loc[date_range.start:date_range.end] # this is very sloooow
+            # rtn = TickStore._fast_time_slice(rtn, date_range.start, date_range.end)
             istart = np.searchsorted(idx_ns, dt2ns(date_range.start), side='left')
             iend = np.searchsorted(idx_ns, dt2ns(date_range.end), side='right')
-            #istart = np.searchsorted(rtn.index, (date_range.start), side='left')
-            #iend = np.searchsorted(rtn.index, (date_range.end), side='right')
-            rtn = rtn.iloc[istart:iend]# this is fast
+            # istart = np.searchsorted(rtn.index, (date_range.start), side='left')
+            # iend = np.searchsorted(rtn.index, (date_range.end), side='right')
+            rtn = rtn.iloc[istart:iend]  # this is fast
 
-            #assert len(rtn1) == len(rtn)
-            #assert rtn1.index[0] ==rtn.index[0], (rtn1.index, rtn.index)
-            #assert (rtn1.index == rtn.index).all()
+            # assert len(rtn1) == len(rtn)
+            # assert rtn1.index[0] ==rtn.index[0], (rtn1.index, rtn.index)
+            # assert (rtn1.index == rtn.index).all()
             # pd.testing.assert_frame_equal(rtn1, rtn, check_exact=True)
 
         return rtn
@@ -554,8 +600,8 @@ class TickStore(object):
         idx_ns = index_to_ns(df, np.int64)
         istart = np.searchsorted(idx_ns, dt2ns(index_start), side='left')
         iend = np.searchsorted(idx_ns, dt2ns(index_end), side='right')
-        #istart = np.searchsorted(df.index, index_start, side='left')
-        #iend = np.searchsorted(df.index, index_end, side='right')
+        # istart = np.searchsorted(df.index, index_start, side='left')
+        # iend = np.searchsorted(df.index, index_end, side='right')
         return df.iloc[istart:iend]
 
     def read_metadata(self, symbol):
@@ -601,15 +647,15 @@ class TickStore(object):
         return rtn
 
     _INDEX_PREC_TO_MS = {"2s": 2000, "3s": 3000, "4s": 4000, "5s": 5000,
-         "10s": 10_000, "20s": 20_000, "30s": 30_000, "60s": 60_000, "1min": 60_000}
+                         "10s": 10_000, "20s": 20_000, "30s": 30_000, "60s": 60_000, "1min": 60_000}
 
     @staticmethod
     def _set_or_promote_dtype(column_dtypes, c, dtype):
         existing_dtype = column_dtypes.get(c)
         if existing_dtype is None or existing_dtype != dtype:
             # Promote ints to floats - as we can't easily represent NaNs
-            if np.issubdtype(dtype, np.integer): # <- this was `int`
-                dtype = np.dtype('f8') # float64
+            if np.issubdtype(dtype, np.integer):  # <- this was `int`
+                dtype = np.dtype('f8')  # float64
             column_dtypes[c] = np.promote_types(column_dtypes.get(c, dtype), dtype)
 
     def _prepend_image(self, document, im, rtn_length, column_dtypes, column_set, columns):
@@ -644,15 +690,18 @@ class TickStore(object):
         rtn = {}
         if doc[VERSION] != 3 and doc[VERSION] != CHUNK_VERSION_NUMBER_MAX:
             raise ArcticException("Unhandled document version: %s" % doc[VERSION])
-        #if doc.get(INDEX_PRECISION, 'ms') != self._index_precision:
+        # if doc.get(INDEX_PRECISION, 'ms') != self._index_precision:
         #    raise ArcticException("Unexpected index precision: %s" % doc.get(INDEX_PRECISION, 'ms'))
         # np.cumsum copies the read-only array created with frombuffer
         buf = lz4_decompress(doc[INDEX])
         if doc[VERSION] == 4:
-            rtn[INDEX] = np.cumsum(nparray_varint_decode(buf))
+            idx = nparray_varint_decode(buf)
         else:
-            rtn[INDEX] = np.cumsum(np.frombuffer(buf, dtype='uint64'))
+            idx = np.frombuffer(buf, dtype='uint64')
         del buf
+        assert len(idx) <2 or idx[1:].min() >= 0, "non monotonically increasing index"  # todo remove
+        rtn[INDEX] = np.cumsum(idx)
+        del idx
 
         ns_prec = 1
         ip = doc.get(INDEX_PRECISION, 'ms')
@@ -665,7 +714,7 @@ class TickStore(object):
             s = TickStore._INDEX_PREC_TO_MS[ip]
             if s is None:
                 s = pd.to_timedelta(ip).total_seconds() * 1000
-                assert s >= 1 and int(s) == s # TODO add support for sub-ms precision
+                assert s >= 1 and int(s) == s  # TODO add support for sub-ms precision
                 s = int(s)
                 TickStore._INDEX_PREC_TO_MS[ip] = s
 
@@ -674,11 +723,10 @@ class TickStore(object):
 
         start_ns = dt2ns(doc[START])
         end_ns = dt2ns(doc[END])
-        assert start_ns %ns_prec == 0, (start_ns / ns_prec)
+        assert start_ns % ns_prec == 0, (start_ns / ns_prec)
         assert end_ns % ns_prec == 0, (end_ns / ns_prec)
-        assert rtn[INDEX][0]*1000_000 == dt2ns(doc[START])
-        assert rtn[INDEX][-1]*1000_000 == dt2ns(doc[END]), (self._index_precision, rtn[INDEX][-1]*1000_000, dt2ns(doc[END]))
-
+        assert rtn[INDEX][0] * 1000_000 == start_ns
+        assert rtn[INDEX][-1] * 1000_000 == end_ns, (self._index_precision, rtn[INDEX][-1] * 1000_000, end_ns)
 
         doc_length = len(rtn[INDEX])
         column_set.update(doc[COLUMNS].keys())
@@ -806,7 +854,7 @@ class TickStore(object):
                 start = start.replace(tzinfo=mktz('UTC'))
             if doc[END] > start:
                 raise OverlappingDataException(
-                    symbol+ " Document already exists with start:{} end:{} in the range of our start:{} end:{}".format(
+                    symbol + " Document already exists with start:{} end:{} in the range of our start:{} end:{}".format(
                         doc[START], doc[END], start, end))
 
     def write(self, symbol, data, initial_image=None, metadata=None, to_dtype=None, codec=None):
@@ -828,15 +876,15 @@ class TickStore(object):
         metadata: dict
             optional user defined metadata - one per symbol
         """
-        pandas =  isinstance(data, pd.DataFrame)
+        pandas = isinstance(data, pd.DataFrame)
 
         # Check for overlapping data
-        start, end = TickStore._get_time_start_end(data, self._index_precision_int)
-        self._assert_nonoverlapping_data(symbol, start, end) # TODO
+        start, end = TickStore._get_time_start_end(data, self._index_quant_ns)
+        self._assert_nonoverlapping_data(symbol, start, end)  # TODO
 
         if pandas:
-            #assert codec is None
-            #assert self._index_precision is None or self._index_precision == 'ms'
+            # assert codec is None
+            # assert self._index_precision is None or self._index_precision == 'ms'
             buckets = self._pandas_to_buckets(data, symbol, initial_image, to_dtype=to_dtype, codec=codec)
         else:
             buckets = self._to_buckets(data, symbol, initial_image, to_dtype=to_dtype, codec=codec)
@@ -884,20 +932,21 @@ class TickStore(object):
 
     def _pandas_to_buckets(self, x, symbol, initial_image, to_dtype=None, codec=None):
         rtn = []
-        idx_prec = self._index_precision_int
+        idx_prec = self._index_quant_ns
         for i in range(0, len(x), self._chunk_size):
             bucket, initial_image = TickStore._to_bucket_pandas(x.iloc[i:i + self._chunk_size], symbol, initial_image,
                                                                 index_precision=idx_prec,
-                                                                to_dtype=to_dtype, codec=codec, verify_codec=self._verify_codec)
+                                                                to_dtype=to_dtype, codec=codec,
+                                                                verify_codec=self._verify_codec)
             rtn.append(bucket)
         return rtn
 
     @property
-    def _index_precision_int(self):
-        return TickStore.index_precision_to_ns(self._index_precision)
+    def _index_quant_ns(self):
+        return TickStore._time_quant_to_ns(self._index_precision)
 
     @staticmethod
-    def index_precision_to_ns(prec:str|int):
+    def _time_quant_to_ns(prec: str | int):
         if prec is None or prec == 'ms':
             i = 1_000_000  # ms->ns
         elif prec == 's':
@@ -909,14 +958,14 @@ class TickStore(object):
             raise ValueError("unrecognized index_precision %s" % prec)
         return i
 
-
     def _to_buckets(self, x, symbol, initial_image, to_dtype=None, codec=None):
         rtn = []
-        idx_prec = self._index_precision_int
+        idx_prec = self._index_quant_ns
         for i in range(0, len(x), self._chunk_size):
             bucket, initial_image = TickStore._to_bucket(x[i:i + self._chunk_size], symbol, initial_image,
                                                          index_precision=idx_prec,
-                                                         to_dtype=to_dtype, codec=codec, verify_codec=self._verify_codec)
+                                                         to_dtype=to_dtype, codec=codec,
+                                                         verify_codec=self._verify_codec)
             rtn.append(bucket)
         return rtn
 
@@ -1082,10 +1131,10 @@ class TickStore(object):
         return enc, codec_sel, gain
 
     @staticmethod
-    def _get_time_start_end(ticks:list|pd.DataFrame, index_precision) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    def _get_time_start_end(ticks: list | pd.DataFrame, index_precision) -> Tuple[pd.Timestamp, pd.Timestamp]:
         assert isinstance(index_precision, (np.integer, int))
 
-        if isinstance(ticks, list) :
+        if isinstance(ticks, list):
             start = ticks[0]['index']
             end = ticks[-1]['index']
         elif isinstance(ticks, pd.DataFrame):
@@ -1123,9 +1172,10 @@ class TickStore(object):
     TZ_UTC = datetime.timezone.utc
 
     @staticmethod
-    def _bucket_head(ticks, symbol, initial_image, index_precision:int, codec):
+    def _bucket_head(ticks, symbol, initial_image, index_precision: int, codec):
         index_vlq = True
-        assert isinstance(index_precision, (np.integer,int)) and index_precision > 0, (index_precision, type(index_precision))
+        assert isinstance(index_precision, (np.integer, int)) and index_precision > 0, (index_precision,
+                                                                                        type(index_precision))
         is_ms = index_precision == 1_000_000
 
         rtn = {SYMBOL: symbol,
@@ -1138,31 +1188,30 @@ class TickStore(object):
             if index_precision == 1_000_000_000:
                 rtn[INDEX_PRECISION] = 's'
             elif (index_precision % 1_000_000_000) == 0:
-                rtn[INDEX_PRECISION] = str(index_precision//1_000_000_000) + 's'
+                rtn[INDEX_PRECISION] = str(index_precision // 1_000_000_000) + 's'
             else:
                 rtn[INDEX_PRECISION] = index_precision
 
         start, end = TickStore._get_time_start_end(ticks, index_precision)
 
-
         # pd.Timestamp is a reasonable timestamp format to work with here because it has ns precision
         # and caries timezone info
         assert isinstance(start, pd.Timestamp) and isinstance(end, pd.Timestamp)
-        assert end.tzinfo == start.tzinfo == TickStore.TZ_UTC
+        assert end.tzinfo == start.tzinfo
+        # assert start.tzinfo == TickStore.TZ_UTC, (start.tzinfo, TickStore.TZ_UTC)
         if start > end:
             raise ValueError('start %s > end %s' % (start, end))
 
-
         # TODO write at test for thath (failing with floats)
-        #start = datetime.datetime.fromtimestamp(ceil(start.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
-        #end = datetime.datetime.fromtimestamp(ceil(end.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
-        #start = ns2dt(ceil(dt2ns(start)), utc=True)
-        #end = ns2dt(ceil(dt2ns(end)), utc=True)
+        # start = datetime.datetime.fromtimestamp(ceil(start.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
+        # end = datetime.datetime.fromtimestamp(ceil(end.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
+        # start = ns2dt(ceil(dt2ns(start)), utc=True)
+        # end = ns2dt(ceil(dt2ns(end)), utc=True)
 
-        #to_ns = lambda t:np.datetime64(t).astype('datetime64[ns]').astype(np.int64)
-        #ns_to_dt = lambda ns, tzi: np.datetime64(int(ns), 'ns').astype(datetime.datetime).replace(tzinfo=tzi)
-        #start = ns_to_dt(ceil(to_ns(start)), tzi=start.tzinfo)
-        #end = ns_to_dt(ceil(to_ns(start)), end.tzinfo)
+        # to_ns = lambda t:np.datetime64(t).astype('datetime64[ns]').astype(np.int64)
+        # ns_to_dt = lambda ns, tzi: np.datetime64(int(ns), 'ns').astype(datetime.datetime).replace(tzinfo=tzi)
+        # start = ns_to_dt(ceil(to_ns(start)), tzi=start.tzinfo)
+        # end = ns_to_dt(ceil(to_ns(start)), end.tzinfo)
 
         if initial_image:
             image_start = initial_image.get('index', start)
@@ -1178,11 +1227,11 @@ class TickStore(object):
         return rtn, index_vlq
 
     @staticmethod
-    def _to_bucket(ticks, symbol, initial_image, index_precision:int, to_dtype=None, codec=None, verify_codec=True):
+    def _to_bucket(ticks, symbol, initial_image, index_precision: int, to_dtype=None, codec=None, verify_codec=True):
         assert index_precision >= 1000_000
 
         rtn, index_vlq = TickStore._bucket_head(ticks, symbol, initial_image, index_precision, codec)
-        #tr = [to_dt(ticks[0]['index']), to_dt(ticks[-1]['index'])]
+        # tr = [to_dt(ticks[0]['index']), to_dt(ticks[-1]['index'])]
         tr = [rtn[START], rtn[END]]
 
         data = {}
@@ -1198,13 +1247,13 @@ class TickStore(object):
                         rowmask[k][i] = 1
                     else:
                         if isinstance(v, (int, np.integer)):
-                            v *= 1000_000 # ms -> ns
+                            v *= 1000_000  # ms -> ns
                         elif isinstance(v, pd.Timestamp):
                             v = v.value
                         else:
                             raise ValueError("Unsupported type %s" % type(v))
-                        v = -(-v//index_precision) * index_precision # ns ceil
-                        v //= 1000_000 # ns -> ms (we made sure index_precision<=1000_000)
+                        v = -(-v // index_precision) * index_precision  # ns ceil
+                        v //= 1000_000  # ns -> ms (we made sure index_precision<=1000_000)
                         # v = TickStore._to_ms(v)
                         if data[k][-1] > v:
                             raise UnorderedDataException("Timestamps out-of-order: %s > %s" % (
@@ -1236,6 +1285,8 @@ class TickStore(object):
         is_ms = index_precision == 1_000_000
         assert is_ms or index_precision == 1_000_000_000
 
+        # TODO must to differentiation first, then quantization
+        # TODO write test to prove
         if isinstance(data['index'][0], np.datetime64):
             idx = np.concatenate(([data['index'][0].astype(np.int64)], np.diff(data['index']).astype(np.int64)))
             s = np.int64(index_precision)
@@ -1244,13 +1295,13 @@ class TickStore(object):
             idx = np.concatenate((np.int64([data['index'][0]]), np.diff(data['index']).astype(np.int64)))
             assert index_precision >= 1_000_000
             assert (index_precision % 1_000_000) == 0
-            s = np.int64(index_precision) / 1000_000 # index granularity in *ms*
+            s = np.int64(index_precision) / 1000_000  # index granularity in *ms*
         if s != 1:
             assert idx.dtype == np.int64
             idx = -(-idx // s)  # causal conversion ns -> ms, s
         if idx.dtype != np.uint64:
             idx = idx.astype(np.uint64)  # TODO  use .view()
-        assert dt2ns(rtn[START])//1000_000 == idx[0] * s
+        assert dt2ns(rtn[START]) // 1000_000 == idx[0] * s
         # assert dt2ns(rtn[END])//1000_000 == sum(idx) * s
         rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
         return rtn, final_image
@@ -1261,13 +1312,13 @@ class TickStore(object):
         rtn, index_vlq = TickStore._bucket_head(df, symbol, initial_image, index_precision, codec)
         tr = [to_dt(df.index[0]), to_dt(df.index[-1])]
 
-        #assert len(df) > 1, len(df)
+        # assert len(df) > 1, len(df)
 
         assert not initial_image
 
-        idx = index_to_ns(df, np.int64) # can't use np.uint64 here for timestamps before unix epoch
+        idx = index_to_ns(df, np.int64)  # can't use np.uint64 here for timestamps before unix epoch
 
-        assert isinstance(index_precision, (np.integer,int)), (index_precision, type(index_precision))
+        assert isinstance(index_precision, (np.integer, int)), (index_precision, type(index_precision))
         assert index_precision > 0
         s = np.int64(index_precision)
 
@@ -1278,20 +1329,20 @@ class TickStore(object):
         assert idx.dtype == np.int64
         assert dt2ns(rtn[START]) == idx[0] * s
         assert dt2ns(rtn[END]) == idx[-1] * s
+
         # internally np.diff converts to int64 and raises on overflow
         # also there is no safe check for monotony with uint64 input ?
         idx = np.diff(idx, prepend=np.int64(0))
-        if  len(idx) > 1 and idx[1:].min() < 0:
+        if len(idx) > 1 and idx[1:].min() < 0:
             raise ValueError("non monotonic index")
         assert idx.dtype == np.int64
 
-        #if idx[0] < 0:
+        # if idx[0] < 0:
         #    idx[0] = (2<<(64-1)) + idx[0] # equal to `idx[0].view(np.uint64)` buf faster
-        #assert idx[0] >= 0
+        # assert idx[0] >= 0
 
         # now it is safe to to an unsafe reinterpreting cast of the int64 to uint64
-        idx = idx.view(np.uint64) # no cost O(0)
-
+        idx = idx.view(np.uint64)  # no cost O(0)
 
         compressor = binary_compressors.get(index_compressor)
         assert compressor is not None, ("unknown compressor %s" % index_compressor)
@@ -1318,7 +1369,6 @@ class TickStore(object):
             if gain:
                 rtn[COLUMNS][k][GAIN] = gain
                 rtn[VERSION] = max(rtn[VERSION], CHUNK_VERSION_NUMBER_MAX)
-
 
         return rtn, {}
 
@@ -1351,3 +1401,14 @@ class TickStore(object):
         if res is None:
             raise NoDataFoundException("No Data found for {}".format(symbol))
         return utc_dt_to_local_dt(res[START])
+
+
+from functools import partial
+def to_iso(t, **kwargs) -> Union[str, List[str]]:
+    # iso 8601
+    if isinstance(t, list) or isinstance(t, map) or isinstance(t, tuple):
+        return type(t)(map(partial(to_iso, **kwargs), t))
+    return pd.Timestamp(t, **kwargs).isoformat().replace('+00:00', 'Z')
+
+def ms_to_iso(t, **kwargs) -> Union[str, List[str]]:
+    return to_iso(t, unit='ms', **kwargs)
