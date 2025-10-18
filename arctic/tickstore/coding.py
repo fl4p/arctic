@@ -104,9 +104,9 @@ binary_compressors = dict(
     gz=zlib.compress,  # partial(zlib.compress, wbits=15),
     # sgz_=partial(zlib.compress, wbits=15),
     lzma=lambda d: lzma.compress(d, format=lzma.FORMAT_ALONE, preset=lzma.PRESET_EXTREME),
-    br_9=lambda d: brotli.compress(d, quality=9, mode=brotli.MODE_FONT),
+    br_9=lambda d: brotli.compress(d, quality=9, mode=brotli.MODE_FONT), # no-gil
     br_10=lambda d: brotli.compress(d, quality=10),
-    br=lambda d: brotli.compress(d, quality=11),  #default q=11
+    br=lambda d: brotli.compress(d, quality=11),  # default q=11
 )
 
 binary_decompressors = dict(
@@ -118,6 +118,32 @@ binary_decompressors = dict(
     br_10=lambda d: brotli.decompress(d),
     br=lambda d: brotli.decompress(d),
 )
+
+try:
+    # py3.14
+    from compression import zstd
+
+    binary_compressors['zstd'] = lambda b: zstd.compress(b, level=20)  # 3 is default
+    binary_decompressors['zstd'] = lambda b: zstd.decompress(b)
+except ImportError:
+    pass
+
+try:
+    # pypi version (wraps lib by Y?)
+    import zstd
+
+    binary_compressors['zstdY'] = lambda b: zstd.compress(b, 3)  # 3 is default
+    binary_decompressors['zstdY'] = lambda b: zstd.decompress(b)
+except ImportError:
+    pass
+
+try:
+    import gorillacompression as gc
+
+    binary_compressors['gc32'] = lambda a: gc.ValuesEncoder.encode_all(a, 'f32')
+    binary_decompressors['gc32'] = lambda b: gc.ValuesDecoder.decode_all(b)
+except ImportError:
+    pass
 
 
 class LnQ16_VQL():

@@ -14,7 +14,7 @@ It comes with a couple of compression techniques to lower disk usage.
 * Added index varint compression
 * Fixed pickling for e.g. multi-process jobs (`joblib`)
 * Added write and read statistics (number of compressed bytes per column)
-
+* Arbitrary index time quants to reduce index storage size significantly if points can have the same timestamp
 
 # TODO
 

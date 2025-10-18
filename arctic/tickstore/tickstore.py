@@ -147,10 +147,10 @@ LnQ20VQLgz = LnQ16_VQL(loq_loss=20, comp='gz', log_prescale=20, loq_preadd=1e-12
 register_codec('LnQ20VQLgz', LnQ20VQLgz)  # for l2 data, general purpose [1e-15, 2e+32]
 
 register_codec('LnQ15br9', LnQ16('br_9', 15))  # for qty, 115ppm, abs(x) >= 0.73e-11
-register_codec('LnQ185VQLgz', LnQ16_VQL('gz', 1.85, 0, 0))  # for px 16ppm
+register_codec('LnQ185VQLgz', LnQ16_VQL('gz', 1.85, 0, 0))  # for px 16ppm, down to 1e-45, then overflow
 
 
-def index_to_ns(series, dtype):
+def index_to_ns(series, dtype=np.int64):
     try:
         # python 3 & PeriodIndex
         idx_dt = series.index.tz_convert('UTC').tz_localize(None).astype('datetime64[ns]')
@@ -188,7 +188,7 @@ class TickStore(object):
     def _ensure_index(self):
         collection = self._collection
         collection.create_index([(SYMBOL, pymongo.ASCENDING),
-                                 (START, pymongo.ASCENDING)], background=True) # this can be made unique
+                                 (START, pymongo.ASCENDING)], background=True)  # this can be made unique
         collection.create_index([(START, pymongo.ASCENDING)], background=True)
         collection.create_index([(END, pymongo.ASCENDING)], background=True)
 
@@ -415,7 +415,7 @@ class TickStore(object):
         cursor = data_coll.find(query, projection=projection).sort([(START, pymongo.ASCENDING)], )
         num = data_coll.count(query)
         if show_progress:
-            #num = data_coll.count(query)
+            # num = data_coll.count(query)
             if num > 20:
                 cursor = progressbar(cursor, prefix=symbol, count=num)
 
@@ -444,19 +444,19 @@ class TickStore(object):
                 continue
             if data[INDEX][0] < t:
                 print(self._arctic_lib, symbol, '\noverlapping blocks=[\n')
-                print(',\n'.join(([repr(ms_to_iso((b[INDEX][0], b[INDEX][-1]))) for b in buckets]))+']')
+                print(',\n'.join(([repr(ms_to_iso((b[INDEX][0], b[INDEX][-1]))) for b in buckets])) + ']')
 
                 grouped = defaultdict(list)
                 for b in buckets:
                     grouped[(b[INDEX][0], b[INDEX][-1])].append(b)
 
-                b2 = list(data_coll.find(query, projection={"_id":1,"s":1}).sort([(START, pymongo.ASCENDING)], ))
+                b2 = list(data_coll.find(query, projection={"_id": 1, "s": 1}).sort([(START, pymongo.ASCENDING)], ))
                 print(b2)
 
                 print('grouped:')
-                for (s,e), g in grouped.items():
-                    print(s,e, len(g)) # TODO _id
-                for (s,e), g in grouped.items():
+                for (s, e), g in grouped.items():
+                    print(s, e, len(g))  # TODO _id
+                for (s, e), g in grouped.items():
                     for b in g[1:]:
                         assert (b[INDEX] == g[0][INDEX]).all()
                         assert b.keys() == g[0].keys()
@@ -699,7 +699,7 @@ class TickStore(object):
         else:
             idx = np.frombuffer(buf, dtype='uint64')
         del buf
-        assert len(idx) <2 or idx[1:].min() >= 0, "non monotonically increasing index"  # todo remove
+        assert len(idx) < 2 or idx[1:].min() >= 0, "non monotonically increasing index"  # todo remove
         rtn[INDEX] = np.cumsum(idx)
         del idx
 
@@ -1402,13 +1402,25 @@ class TickStore(object):
             raise NoDataFoundException("No Data found for {}".format(symbol))
         return utc_dt_to_local_dt(res[START])
 
+    def total_rows(self, symbol):
+        res = self._collection.aggregate([
+            {"$match": {SYMBOL: symbol}},
+            {"$group": {"_id": "$" + SYMBOL, "sum": {"$sum": "$" + COUNT}}}
+        ])
+        if res is None:
+            raise NoDataFoundException("No Data found for {}".format(symbol))
+        return next(res)['sum']
+
 
 from functools import partial
+
+
 def to_iso(t, **kwargs) -> Union[str, List[str]]:
     # iso 8601
     if isinstance(t, list) or isinstance(t, map) or isinstance(t, tuple):
         return type(t)(map(partial(to_iso, **kwargs), t))
     return pd.Timestamp(t, **kwargs).isoformat().replace('+00:00', 'Z')
+
 
 def ms_to_iso(t, **kwargs) -> Union[str, List[str]]:
     return to_iso(t, unit='ms', **kwargs)
