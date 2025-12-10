@@ -1118,8 +1118,9 @@ class TickStore(object):
                         print('error coding', codec_sel, dbg_ctx)
                         raise
                     if verify:
-                        code_err = np.nanmax(abs(coder.decode(enc) - v) / (abs(v) + coder.rtol_reg))
-                        assert code_err < coder.rtol_max, (round(code_err, 6), dbg_ctx)
+                        d = coder.decode(enc)
+                        code_err = np.nanmax(abs(d - v) / (abs(v) + coder.rtol_reg))
+                        assert code_err < coder.rtol_max, (round(code_err, 6), d, v, dbg_ctx)
 
         if verify:
             buf2 = lz4_compressHC(v.tobytes())  # this is pretty fast, so just try if we are better

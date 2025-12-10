@@ -16,6 +16,10 @@ It comes with a couple of compression techniques to lower disk usage.
 * Added write and read statistics (number of compressed bytes per column)
 * Arbitrary index time quants to reduce index storage size significantly if points can have the same timestamp
 
+# Speed Optimizations
+
+Slicing: instead of `df[t0:t1]` slicing on TimeIndex, use `np.sortedsearch()`
+
 # TODO
 
 - implement cache hook and test performance (tickstore buckets)
