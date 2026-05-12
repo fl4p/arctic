@@ -578,8 +578,9 @@ class TickStore(object):
         if date_range:
             # FIXME: support DateRange.interval...
             pi = self._index_quant_ns
-            if dt2ns(date_range.end) % pi or dt2ns(date_range.start) % pi:
-                warnings.warn('read(): DateRange timestamps are sub index-precision %s' % (self._index_precision))
+            #if dt2ns(date_range.end) % pi or dt2ns(date_range.start) % pi:
+            #    warnings.warn('read(): DateRange timestamps are sub index-precision %s' % (self._index_precision))
+            # ^ TODO enable warning if CLOSED_CLOSED
             # if date_range.start > index[0] and date_range.end < index[-1]:
             # rtn1 = rtn.loc[date_range.start:date_range.end] # this is very sloooow
             # rtn = TickStore._fast_time_slice(rtn, date_range.start, date_range.end)
