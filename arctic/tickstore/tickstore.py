@@ -461,6 +461,7 @@ class TickStore(object):
                         assert (b[INDEX] == g[0][INDEX]).all()
                         assert b.keys() == g[0].keys()
                         assert pickle.dumps(b) == pickle.dumps(g[0])
+                        # if all these asserts pass, we known that the overlapping blocks are just duplicates
 
                 raise ValueError('overlap block: prev ends at %s, curr start at %s' % ms_to_iso((t, data[INDEX][0])))
 
