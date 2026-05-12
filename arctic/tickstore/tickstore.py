@@ -597,6 +597,34 @@ class TickStore(object):
 
         return rtn
 
+    def get_blocks(self, symbol, date_range=None, allow_secondary=None):
+        date_range = to_pandas_closed_closed(date_range)
+
+        multiple_symbols = not isinstance(symbol, str)
+
+        date_range = to_pandas_closed_closed(date_range)
+        query = self._symbol_query(symbol)
+        assert not date_range, "not implemented"
+        #query.update(self._mongo_date_range_query(symbol, date_range))
+
+        projection = dict([(SYMBOL, 1),
+                               (INDEX_PRECISION, 1),
+                               (START, 1),
+                               (END, 1),
+                               (VERSION, 1)
+                               ])
+
+        data_coll = self._collection.with_options(read_preference=self._read_preference(allow_secondary))
+
+        cursor = data_coll.find(query, projection=projection).sort([(START, pymongo.ASCENDING)], )
+
+        buckets = []
+        for doc in cursor:
+            assert doc[SYMBOL] == symbol
+            buckets.append((utc_dt_to_local_dt(doc[START]), utc_dt_to_local_dt(doc[END])))
+
+        return buckets
+
     @staticmethod
     def _fast_time_slice(df, index_start, index_end):
         idx_ns = index_to_ns(df, np.int64)
