@@ -1433,9 +1433,15 @@ class TickStore(object):
             raise NoDataFoundException("No Data found for {}".format(symbol))
         return utc_dt_to_local_dt(res[START])
 
-    def total_rows(self, symbol):
+    def total_rows(self, symbol,  date_range=None ):
+        query = {SYMBOL: symbol}
+        date_range = to_pandas_closed_closed(date_range)
+        if date_range is not None:
+            assert date_range.start and date_range.end
+            query[START] = {'$gte': date_range.start}
+            query[END] = {'$lte': date_range.end}
         res = self._collection.aggregate([
-            {"$match": {SYMBOL: symbol}},
+            {"$match": query},
             {"$group": {"_id": "$" + SYMBOL, "sum": {"$sum": "$" + COUNT}}}
         ])
         if res is None:
