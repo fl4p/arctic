@@ -15,7 +15,7 @@ from pymongo import ReadPreference
 from pymongo.errors import OperationFailure
 from pymongo.results import InsertManyResult
 
-from .coding import nparray_varint_encode, nparray_varint_decode, encode_logQ16_10_dzv, decode_logQ16_10_dzv, \
+from .coding import nparray_varint_encode, nparray_varint_decode, decode_logQ16_10_dzv, \
     LnQ16_VQL, LnQ16_zlib, binary_compressors, LnQ16
 
 try:
@@ -527,9 +527,9 @@ class TickStore(object):
 
         rtn = self._pad_and_fix_dtypes(rtn, column_dtypes)
 
-        # index = pd.to_datetime(np.concatenate(rtn[INDEX]), utc=True, unit='ms') # TODO fix takes long
+        # index = pd.to_datetime(np.concatenate(rtn[INDEX]), utc=True, unit='ms') # this is slow
         idx_ns = np.concatenate(rtn[INDEX]) * np.int64(1000_000)
-        index = pd.DatetimeIndex(idx_ns, tz=datetime.timezone.utc)  # this is zero cost!
+        index = pd.DatetimeIndex(idx_ns, tz=datetime.timezone.utc)  # this has ~zero cost!
         # and we already validated our index during write
 
         if columns is None:
@@ -555,9 +555,7 @@ class TickStore(object):
             else:
                 mgr = _arrays_to_mgr(arrays, columns, index, columns, dtype=None)
         else:
-            # if pd.__version__
-            # new argument typ is mandatory            
-            mgr = _arrays_to_mgr(arrays, columns, index, dtype=None, typ="block")  # TODO array ?
+            mgr = _arrays_to_mgr(arrays, columns, index, dtype=None, typ="block")
 
         rtn = pd.DataFrame(mgr)
         # Present data in the user's default TimeZone
@@ -729,7 +727,7 @@ class TickStore(object):
         else:
             idx = np.frombuffer(buf, dtype='uint64')
         del buf
-        assert len(idx) < 2 or idx[1:].min() >= 0, "non monotonically increasing index"  # todo remove
+        # assert len(idx) < 2 or idx[1:].min() >= 0, "non monotonically increasing index"  # extra check
         rtn[INDEX] = np.cumsum(idx)
         del idx
 
@@ -910,7 +908,7 @@ class TickStore(object):
 
         # Check for overlapping data
         start, end = TickStore._get_time_start_end(data, self._index_quant_ns)
-        self._assert_nonoverlapping_data(symbol, start, end)  # TODO
+        self._assert_nonoverlapping_data(symbol, start, end)
 
         if pandas:
             # assert codec is None
@@ -1120,23 +1118,19 @@ class TickStore(object):
 
     @staticmethod
     def _encode(v, col_name, to_dtype, codec, verify, dbg_ctx):
+        # keep the caller's original values: when to_dtype triggers a gain-scaled downcast (e.g. float16),
+        # that is a *first* lossy stage. verification must measure the codec against the original input
+        # (with gain re-applied, as the reader does) so the to_dtype/gain loss is included, not hidden.
+        v_orig = v if verify else None
         v, gain = TickStore._ensure_supported_dtypes(v, to_dtype=to_dtype)
         enc = None
         codec_sel = None
         if codec:
-            if codec == 'logQ16_10_dzv' or codec == 'log28Q16_10_dzv':
-                raise ArcticException("deprecated codec")
-            elif codec == 'loq16_10_dzv1':
-                # raise ArcticException("deprecated codec")
-                # todo this one is too slow!
-                enc = encode_logQ16_10_dzv(v, prescale=24, preadd=.001, comp='zlib')
-                if verify:
-                    code_err = np.nanmax(
-                        abs(decode_logQ16_10_dzv(enc, prescale=24, preadd=.001, comp='zlib') - v) / (v + 1e-10))
-                    assert code_err < 250e-6, (round(code_err, 6), dbg_ctx)
-                codec_sel = codec
+            # dzv codecs are write-deprecated (superseded by the registry codecs); old data still
+            # decodes via the dzv branch in _decode_bucket.
+            if codec in ('logQ16_10_dzv', 'log28Q16_10_dzv', 'loq16_10_dzv1'):
+                raise ArcticException("deprecated codec: %s" % codec)
             else:
-                # todo select codec based on column name
                 codec_sel = codec[col_name] if isinstance(codec, dict) else codec
                 if codec_sel is not None:
                     coder = codec_registry.get(codec_sel)
@@ -1148,12 +1142,24 @@ class TickStore(object):
                         print('error coding', codec_sel, dbg_ctx)
                         raise
                     if verify:
+                        # reconstruct what the reader gets: decode, then re-apply gain (decode side does
+                        # `values.astype(f32) * GAIN`). Measure against the original input, not the
+                        # already-downcast v, so a gain/to_dtype lossy stage can't slip past unverified.
                         d = coder.decode(enc)
-                        code_err = np.nanmax(abs(d - v) / (abs(v) + coder.rtol_reg))
-                        assert code_err < coder.rtol_max, (round(code_err, 6), d, v, dbg_ctx)
+                        ref = d * np.float32(gain) if gain else d
+                        code_err = np.nanmax(abs(ref - v_orig) / (abs(v_orig) + coder.rtol_reg))
+                        if not code_err < coder.rtol_max:
+                            raise ArcticException("codec %s rtol %s exceeds %s %s"
+                                                  % (codec_sel, round(code_err, 6), coder.rtol_max, dbg_ctx))
 
-        if verify:
-            buf2 = lz4_compressHC(v.tobytes())  # this is pretty fast, so just try if we are better
+        # lz4 lossless is the no-codec fast-path (gz/brotli would be too slow here). Keep whichever of
+        # lossy-codec / lossless-lz4 is smaller. Decoupled from `verify` so disabling verification never
+        # leaves a column un-encoded.
+        # Skip the probe when the codec already won decisively: lz4-HC won't shrink this numeric data below
+        # ~1/3 of its raw size, so if the codec output is already smaller than that, raw lz4 can't beat it
+        # and we avoid the v.tobytes() alloc + full-image compression. v.nbytes is free (len * itemsize).
+        if not codec_sel or len(enc) * 3 > v.nbytes:
+            buf2 = lz4_compressHC(v.tobytes())
             if not codec_sel or len(buf2) < len(enc):
                 enc = buf2
                 codec_sel = None
@@ -1316,22 +1322,21 @@ class TickStore(object):
         is_ms = index_precision == 1_000_000
         assert is_ms or index_precision == 1_000_000_000
 
-        # TODO must to differentiation first, then quantization
-        # TODO write test to prove
         if isinstance(data['index'][0], np.datetime64):
-            idx = np.concatenate(([data['index'][0].astype(np.int64)], np.diff(data['index']).astype(np.int64)))
+            idx:np.array[np.int64] = np.concatenate(([data['index'][0].astype(np.int64)], np.diff(data['index']).astype(np.int64)))
             s = np.int64(index_precision)
         else:
             # assume ms integers
-            idx = np.concatenate((np.int64([data['index'][0]]), np.diff(data['index']).astype(np.int64)))
+            idx:np.array = np.concatenate((np.int64([data['index'][0]]), np.diff(data['index']).astype(np.int64)))
             assert index_precision >= 1_000_000
             assert (index_precision % 1_000_000) == 0
             s = np.int64(index_precision) / 1000_000  # index granularity in *ms*
         if s != 1:
             assert idx.dtype == np.int64
-            idx = -(-idx // s)  # causal conversion ns -> ms, s
+            idx:np.array = -(-idx // s)  # causal conversion ns -> ms, s
+        idx: np.array
         if idx.dtype != np.uint64:
-            idx = idx.astype(np.uint64)  # TODO  use .view()
+            idx = idx.astype(np.uint64)
         assert dt2ns(rtn[START]) // 1000_000 == idx[0] * s
         # assert dt2ns(rtn[END])//1000_000 == sum(idx) * s
         rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))

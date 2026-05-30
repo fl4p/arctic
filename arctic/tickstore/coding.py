@@ -42,7 +42,20 @@ def numpy_fill(arr):
     return df.values
 
 
+def _assert_finite(x, where):
+    # Lossy log codecs map through log(x), so NaN/inf can't be represented. Without this guard a
+    # non-finite slips through np.round(...).astype(int) as a silent garbage value (e.g. INT_MIN) and
+    # corrupts the stored data. Callers must drop/mask NaN before encoding (tickstore does so via the
+    # per-column rowmask); anything else is a fail-fast error rather than silent corruption.
+    if not np.isfinite(x).all():
+        bad = ~np.isfinite(np.asarray(x))
+        i = int(np.argmax(bad))
+        raise ValueError("%s: %d non-finite input value(s) (first at index %d: %r); "
+                         "drop or mask NaN/inf before encoding" % (where, int(bad.sum()), i, np.asarray(x)[i]))
+
+
 def log_q16(x, loss=10, prescale=16, preadd=1):
+    _assert_finite(x, 'log_q16')
     f = np.round(np.log10(x * (2 ** prescale) + preadd) * (2 ** 16 / loss))
     return (f).astype('int')
 
@@ -79,6 +92,7 @@ LOQ_PREADD = .0001
 def ln_q16(x, loss=15, prescale=LOQ_PRESCALE, preadd=LOQ_PREADD):
     ft = np.float32
     assert x.dtype == ft, x.dtype
+    _assert_finite(x, 'ln_q16')
     s = ft(2 ** prescale)
     o = ft(preadd)
     if s == 1 and o == 0:
@@ -190,6 +204,7 @@ class LnQ16_VQL():
         # used for px, also supports unsigned values but not encouraged
         # loq+diff+vql
         signed = self._signed
+        _assert_finite(arr, 'LnQ16_VQL.encode')  # before arr.min(), else NaN trips the assert below
         if not signed:
             assert arr.min() >= 0, arr.min()
         i = ln_q16(np.abs(arr) if signed else arr, self.loq_loss, prescale=self.loq_prescale, preadd=self.loq_preadd)

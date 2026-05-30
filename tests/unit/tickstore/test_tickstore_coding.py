@@ -64,7 +64,7 @@ def test_LnQ25VQLgz():
     assert rtol < code.rtol_max
 
     from arctic.tickstore.coding import LnQ16_VQL
-    code2 = LnQ16_VQL(loq_loss=25, comp='zlib', log_prescale=28)
+    code2 = LnQ16_VQL(loq_loss=25, comp='gz', log_prescale=28)
     a = np.array([1.2e+30, 1e-12], dtype=np.float32)
     b = code2.encode(a)
     d = code2.decode(b)
@@ -73,7 +73,7 @@ def test_LnQ25VQLgz():
 
 
     from arctic.tickstore.coding import LnQ16_VQL
-    code2 = LnQ16_VQL(loq_loss=25, comp='zlib', log_prescale=24, loq_preadd=1e-8)
+    code2 = LnQ16_VQL(loq_loss=25, comp='gz', log_prescale=24, loq_preadd=1e-8)
     a = np.array([2e+31, 1e-15, 1e-10, 0.00453, 1234.54], dtype=np.float32)
     b = code2.encode(a)
     d = code2.decode(b)
