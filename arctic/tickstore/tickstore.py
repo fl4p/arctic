@@ -127,12 +127,20 @@ codec_registry = {}
 
 
 def register_codec(name, obj):
-    assert hasattr(obj, 'encode') and callable(obj.encode)
-    assert hasattr(obj, 'decode') and callable(obj.decode)
-    assert hasattr(obj, 'rtol_max') and 0 <= obj.rtol_max <= 0.05
-    assert hasattr(obj, 'rtol_reg') and 0 <= obj.rtol_reg <= 0.0005
-    assert name not in codec_registry
-    assert len(name) < 16
+    # validate with raises (not asserts) so registration is still checked under `python -O`;
+    # the name is persisted as the on-disk CODEC field and must round-trip on read.
+    if not (hasattr(obj, 'encode') and callable(obj.encode)):
+        raise ValueError("codec %r must have a callable encode()" % name)
+    if not (hasattr(obj, 'decode') and callable(obj.decode)):
+        raise ValueError("codec %r must have a callable decode()" % name)
+    if not (hasattr(obj, 'rtol_max') and 0 <= obj.rtol_max <= 0.05):
+        raise ValueError("codec %r must define rtol_max in [0, 0.05]" % name)
+    if not (hasattr(obj, 'rtol_reg') and 0 <= obj.rtol_reg <= 0.0005):
+        raise ValueError("codec %r must define rtol_reg in [0, 0.0005]" % name)
+    if name in codec_registry:
+        raise ValueError("codec %r already registered" % name)
+    if len(name) >= 16:
+        raise ValueError("codec name %r too long (must be < 16 chars)" % name)
     codec_registry[name] = obj
 
 
@@ -727,7 +735,12 @@ class TickStore(object):
         else:
             idx = np.frombuffer(buf, dtype='uint64')
         del buf
-        # assert len(idx) < 2 or idx[1:].min() >= 0, "non monotonically increasing index"  # extra check
+        # Defence-in-depth on read: idx[0] is the absolute first stamp and idx[1:] are the deltas,
+        # stored as int64 reinterpreted to uint64 (so the old `idx[1:].min() >= 0` check on uint64 was
+        # always true and caught nothing). View the deltas back as signed: a negative one means a
+        # corrupted/hand-written bucket -> fail clearly rather than return shuffled ticks via cumsum wrap.
+        if len(idx) > 1 and idx[1:].view(np.int64).min() < 0:
+            raise ArcticException("non-monotonic index in stored bucket (corrupted delta)")
         rtn[INDEX] = np.cumsum(idx)
         del idx
 
@@ -801,7 +814,9 @@ class TickStore(object):
                 else:
                     values = np.frombuffer(bytearray(lz4_decompress(coldata[DATA])), dtype=dtype)
                 if GAIN in coldata:
-                    assert values.dtype == np.float16  # TODO
+                    if values.dtype != np.float16:
+                        raise ArcticException(
+                            "column %s has GAIN set but stored dtype is %s (expected float16)" % (c, values.dtype))
                     values = values.astype(np.float32) * coldata[GAIN]
                     dtype = np.float32
                 TickStore._set_or_promote_dtype(column_dtypes, c, dtype)
@@ -820,7 +835,9 @@ class TickStore(object):
 
     @staticmethod
     def _empty(length, dtype):
-        if dtype is not None and dtype == np.float64:
+        if dtype is not None and np.issubdtype(dtype, np.floating):
+            # float16/float32/float64 all get a NaN-filled array of their own dtype, so gaps in a
+            # (gain-)downcast float column read back as NaN rather than uninitialised object garbage.
             rtn = np.empty(length, dtype)
             rtn[:] = np.nan
             return rtn
@@ -1009,14 +1026,22 @@ class TickStore(object):
     def _str_dtype(dtype):
         """
         Represent dtypes without byte order, as earlier Java tickstore code doesn't support explicit byte order.
+        float16/float32 only occur on the (Python-only) gain/to_dtype downcast write path and produce
+        version-4 chunks that the Java reader never sees.
         """
         assert dtype.byteorder != '>'
         if dtype.kind == 'i':
             assert dtype.itemsize == 8
             return 'int64'
         elif dtype.kind == 'f':
-            assert dtype.itemsize == 8
-            return 'float64'
+            if dtype.itemsize == 8:
+                return 'float64'
+            elif dtype.itemsize == 4:
+                return 'float32'
+            elif dtype.itemsize == 2:
+                return 'float16'
+            else:
+                raise UnhandledDtypeException("Bad float dtype '%s'" % dtype)
         elif dtype.kind == 'U':
             return 'U%d' % (dtype.itemsize / 4)
         else:
@@ -1109,18 +1134,22 @@ class TickStore(object):
                 col_data[GAIN] = gain
                 rtn[VERSION] = max(rtn[VERSION], CHUNK_VERSION_NUMBER_MAX)
             rtn[COLUMNS][col] = col_data
+        # Derive the index in UTC ms from a tz-safe source. recs[index_name] (from df.to_records())
+        # is an object/Timestamp array for tz-aware indices on this pandas version and has no .astype
+        # to datetime64. index_to_ns already does tz_convert('UTC').tz_localize(None) -> datetime64[ns];
+        # convert ns -> ms (floor, matching the naive datetime64[ms] cast for the already-working case).
+        idx_ms = (index_to_ns(df, np.int64) // 1_000_000).astype('uint64')
         rtn[INDEX] = Binary(
             lz4_compressHC(np.concatenate(
-                ([recs[index_name][0].astype('datetime64[ms]').view('uint64')],
-                 np.diff(
-                     recs[index_name].astype('datetime64[ms]').view('uint64')))).tobytes()))
+                ([idx_ms[0]], np.diff(idx_ms))).tobytes()))
         return rtn, final_image
 
     @staticmethod
     def _encode(v, col_name, to_dtype, codec, verify, dbg_ctx):
-        # keep the caller's original values: when to_dtype triggers a gain-scaled downcast (e.g. float16),
-        # that is a *first* lossy stage. verification must measure the codec against the original input
-        # (with gain re-applied, as the reader does) so the to_dtype/gain loss is included, not hidden.
+        # keep the caller's original values so verification measures the codec against the true input,
+        # not an intermediate. (codec + gain-scaled to_dtype downcast is rejected below, so the only
+        # lossy stage compared here is the codec itself.)
+        orig_dtype = v.dtype
         v_orig = v if verify else None
         v, gain = TickStore._ensure_supported_dtypes(v, to_dtype=to_dtype)
         enc = None
@@ -1135,19 +1164,27 @@ class TickStore(object):
                 if codec_sel is not None:
                     coder = codec_registry.get(codec_sel)
                     if coder is None:
-                        raise ValueError("Unsupported codec: %s" % codec)
+                        raise ValueError("Unsupported codec: %s" % codec_sel)
+                    if v.dtype != np.float32:
+                        # The registry codecs operate on float32 (ln_q16 asserts it). Anything else here
+                        # is either a non-float32 column or a gain-scaled to_dtype downcast (e.g. float16)
+                        # -- itself a separate lossy stage that the codec can't represent. Reject up front
+                        # with a clear message rather than crash deep inside coder.encode() (or, for a
+                        # gain downcast, silently store the downcast loss unverified).
+                        raise ArcticException(
+                            "codec %s requires float32 input but column %s is %s (after to_dtype=%s); "
+                            "cast the column to float32 or drop the codec %s"
+                            % (codec_sel, col_name, v.dtype, to_dtype, dbg_ctx))
                     try:
                         enc = coder.encode(v)
-                    except Exception as e:
-                        print('error coding', codec_sel, dbg_ctx)
+                    except Exception:
+                        logger.error("error coding %s %s", codec_sel, dbg_ctx)
                         raise
                     if verify:
-                        # reconstruct what the reader gets: decode, then re-apply gain (decode side does
-                        # `values.astype(f32) * GAIN`). Measure against the original input, not the
-                        # already-downcast v, so a gain/to_dtype lossy stage can't slip past unverified.
+                        # Compare what the reader gets (codec decode) against the original input.
+                        # codec + gain downcast is rejected above, so no gain re-application is needed.
                         d = coder.decode(enc)
-                        ref = d * np.float32(gain) if gain else d
-                        code_err = np.nanmax(abs(ref - v_orig) / (abs(v_orig) + coder.rtol_reg))
+                        code_err = np.nanmax(abs(d - v_orig) / (abs(v_orig) + coder.rtol_reg))
                         if not code_err < coder.rtol_max:
                             raise ArcticException("codec %s rtol %s exceeds %s %s"
                                                   % (codec_sel, round(code_err, 6), coder.rtol_max, dbg_ctx))
@@ -1165,7 +1202,13 @@ class TickStore(object):
                 codec_sel = None
             del buf2
 
-        return enc, codec_sel, gain
+        # DTYPE semantics differ by path:
+        #  - codec: store the logical (pre-cast) dtype; decode reconstructs to float32 then upcasts to it.
+        #  - no-codec: store the physical dtype of the bytes (the possibly gain-downcast v), because the
+        #    reader does np.frombuffer(DATA, dtype=DTYPE) and needs an exact match.
+        dtype = TickStore._str_dtype(orig_dtype if codec_sel else v.dtype)
+
+        return enc, codec_sel, gain, dtype
 
     @staticmethod
     def _get_time_start_end(ticks: list | pd.DataFrame, index_precision) -> Tuple[pd.Timestamp, pd.Timestamp]:
@@ -1197,7 +1240,9 @@ class TickStore(object):
                 # before converting to pydatetime it is important to forward adjust to index resolution
                 # (otherwise we'll floor on the time axis wich we don't want)
                 # datetime.datetime has no ns resolution!
-                return ceil_dt_utc(dt.tz_convert(TickStore.TZ_UTC))
+                # A plain tz-aware datetime.datetime has no .tz_convert; promote to pd.Timestamp first.
+                # (pd.Timestamp.tz_convert is a no-op-equivalent for an already-Timestamp value here.)
+                return ceil_dt_utc(pd.Timestamp(dt).tz_convert(TickStore.TZ_UTC))
             else:
                 raise ValueError("Unsupported datetime type: %s" % type(dt))
 
@@ -1209,8 +1254,7 @@ class TickStore(object):
     TZ_UTC = datetime.timezone.utc
 
     @staticmethod
-    def _bucket_head(ticks, symbol, initial_image, index_precision: int, codec):
-        index_vlq = True
+    def _bucket_head(ticks, symbol, initial_image, index_precision: int, codec, index_vlq=True):
         assert isinstance(index_precision, (np.integer, int)) and index_precision > 0, (index_precision,
                                                                                         type(index_precision))
         is_ms = index_precision == 1_000_000
@@ -1237,7 +1281,10 @@ class TickStore(object):
         assert end.tzinfo == start.tzinfo
         # assert start.tzinfo == TickStore.TZ_UTC, (start.tzinfo, TickStore.TZ_UTC)
         if start > end:
-            raise ValueError('start %s > end %s' % (start, end))
+            # first tick is after the last tick -> the input is not in ascending time order.
+            # surface this as UnorderedDataException (same contract as the per-tick ordering check
+            # below), not a bare ValueError.
+            raise UnorderedDataException('start %s > end %s' % (start, end))
 
         # TODO write at test for thath (failing with floats)
         # start = datetime.datetime.fromtimestamp(ceil(start.timestamp() * 1e9) * 1e-9, tz=TickStore.TZ_UTC)
@@ -1264,10 +1311,18 @@ class TickStore(object):
         return rtn, index_vlq
 
     @staticmethod
-    def _to_bucket(ticks, symbol, initial_image, index_precision: int, to_dtype=None, codec=None, verify_codec=True):
+    def _to_bucket(ticks, symbol, initial_image, index_precision='ms', to_dtype=None, codec=None, verify_codec=True,
+                   varint_coding=False):
+        # index_precision may be given as an ns int (internal callers) or as a precision spec
+        # ('ms', 's', '<n>s', ...) -> normalize to ns. varint_coding selects the on-disk index layout:
+        # True -> varint-encoded deltas (version-4 chunk), False (default) -> raw uint64 deltas
+        # (version-3 chunk). _decode_bucket picks the matching reader off the chunk VERSION.
+        if not isinstance(index_precision, (np.integer, int)):
+            index_precision = TickStore._time_quant_to_ns(index_precision)
         assert index_precision >= 1000_000
 
-        rtn, index_vlq = TickStore._bucket_head(ticks, symbol, initial_image, index_precision, codec)
+        rtn, index_vlq = TickStore._bucket_head(ticks, symbol, initial_image, index_precision, codec,
+                                                index_vlq=bool(varint_coding))
         # tr = [to_dt(ticks[0]['index']), to_dt(ticks[-1]['index'])]
         tr = [rtn[START], rtn[END]]
 
@@ -1279,6 +1334,11 @@ class TickStore(object):
             if initial_image:
                 final_image.update(t)
             for k, v in t.items():
+                if k != 'index' and v != v:
+                    # NaN -> treat as absent, mirroring the pandas path's dropna. The position is left
+                    # unmasked, so it reads back as NaN, and a non-finite value never reaches a lossy
+                    # codec (which would otherwise fail-fast in _assert_finite).
+                    continue
                 try:
                     if k != 'index':
                         rowmask[k][i] = 1
@@ -1287,6 +1347,10 @@ class TickStore(object):
                             v *= 1000_000  # ms -> ns
                         elif isinstance(v, pd.Timestamp):
                             v = v.value
+                        elif isinstance(v, datetime.datetime):
+                            # tz-aware datetime.datetime index values: promote to pd.Timestamp to
+                            # get the UTC ns value (pd.Timestamp.value is tz-independent ns-since-epoch).
+                            v = pd.Timestamp(v).value
                         else:
                             raise ValueError("Unsupported type %s" % type(v))
                         v = -(-v // index_precision) * index_precision  # ns ceil
@@ -1307,10 +1371,11 @@ class TickStore(object):
         for k, v in data.items():
             if k != 'index':
                 v = np.array(v)
-                enc, codec_sel, gain = TickStore._encode(v, k, to_dtype, codec, verify_codec, dbg_ctx=(symbol, k, tr))
+                enc, codec_sel, gain, dtype = TickStore._encode(v, k, to_dtype, codec, verify_codec,
+                                                                dbg_ctx=(symbol, k, tr))
 
                 rtn[COLUMNS][k] = {DATA: Binary(enc),
-                                   DTYPE: TickStore._str_dtype(v.dtype),
+                                   DTYPE: dtype,
                                    ROWMASK: rowmask[k]}
                 if codec_sel:
                     rtn[COLUMNS][k][CODEC] = codec_sel
@@ -1323,23 +1388,31 @@ class TickStore(object):
         assert is_ms or index_precision == 1_000_000_000
 
         if isinstance(data['index'][0], np.datetime64):
-            idx:np.array[np.int64] = np.concatenate(([data['index'][0].astype(np.int64)], np.diff(data['index']).astype(np.int64)))
+            idx = np.concatenate(([data['index'][0].astype(np.int64)], np.diff(data['index']).astype(np.int64)))
             s = np.int64(index_precision)
         else:
             # assume ms integers
-            idx:np.array = np.concatenate((np.int64([data['index'][0]]), np.diff(data['index']).astype(np.int64)))
+            idx = np.concatenate((np.int64([data['index'][0]]), np.diff(data['index']).astype(np.int64)))
             assert index_precision >= 1_000_000
             assert (index_precision % 1_000_000) == 0
-            s = np.int64(index_precision) / 1000_000  # index granularity in *ms*
+            s = np.int64(index_precision) // 1000_000  # index granularity in *ms* (integer; float // here
+            # rounds the subsequent ceil up by one for exact-boundary timestamps)
         if s != 1:
             assert idx.dtype == np.int64
-            idx:np.array = -(-idx // s)  # causal conversion ns -> ms, s
-        idx: np.array
+            idx = -(-idx // s)  # causal conversion ns -> ms, s
         if idx.dtype != np.uint64:
             idx = idx.astype(np.uint64)
-        assert dt2ns(rtn[START]) // 1000_000 == idx[0] * s
+        # idx[0]*s is the first *tick* in ms. START is the bucket start, which an initial_image can
+        # legitimately push earlier than the first tick (image time <= first tick), so the invariant is
+        # START <= first tick, with equality when there is no earlier image.
+        assert dt2ns(rtn[START]) // 1000_000 <= idx[0] * s
         # assert dt2ns(rtn[END])//1000_000 == sum(idx) * s
-        rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
+        # The index layout must match what _decode_bucket infers from the chunk VERSION: version 4 ->
+        # varint, version 3 -> raw uint64. index_vlq drives the version in _bucket_head, but a gain
+        # (to_dtype downcast) or codec can have bumped VERSION to 4 since then, so key off the final
+        # VERSION here rather than index_vlq alone.
+        use_varint = rtn[VERSION] == CHUNK_VERSION_NUMBER_MAX
+        rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if use_varint else idx.tobytes()))
         return rtn, final_image
 
     @staticmethod
@@ -1396,9 +1469,10 @@ class TickStore(object):
             if len(val) == 0:
                 continue
 
-            enc, codec_sel, gain = TickStore._encode(val, k, to_dtype, codec, verify_codec, dbg_ctx=(symbol, k, tr))
+            enc, codec_sel, gain, dtype = TickStore._encode(val, k, to_dtype, codec, verify_codec,
+                                                            dbg_ctx=(symbol, k, tr))
             rtn[COLUMNS][k] = {DATA: binary_class(enc),
-                               DTYPE: TickStore._str_dtype(val.dtype),
+                               DTYPE: dtype,
                                ROWMASK: binary_class(compressor(np.packbits(rm).tobytes()))}
             if codec_sel:
                 rtn[COLUMNS][k][CODEC] = codec_sel

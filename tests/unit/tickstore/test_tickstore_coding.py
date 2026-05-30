@@ -79,3 +79,20 @@ def test_LnQ25VQLgz():
     d = code2.decode(b)
     rtol = max(abs(d - a) / abs(a))
     assert rtol < code2.rtol_max, rtol
+
+
+def test_LnQ15br9():
+    # ported from jnb arctic_test.py: the br9 codec rejects all-zero input (log(0) underflows below
+    # the representable floor), and e_q16 clamps tiny values to the same floor as zero.
+    import pytest
+    from arctic.tickstore.tickstore import codec_registry
+    from arctic.tickstore.coding import e_q16
+
+    c = codec_registry['LnQ15br9']
+    with pytest.raises(ValueError):
+        c.encode(np.float32([0]))
+    with pytest.raises(ValueError):
+        c.encode(np.float32([-0, 0]))
+
+    assert e_q16(np.float32([1e-4]), c.loq_loss, prescale=c.loq_prescale, preadd=c.loq_preadd) == \
+        e_q16(np.float32([0]), c.loq_loss, prescale=c.loq_prescale, preadd=c.loq_preadd)
