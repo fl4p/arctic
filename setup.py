@@ -89,6 +89,7 @@ setup(
                       "pytz",
                       "tzlocal",
                       "lz4", "brotli","lz4",
+                      "pcodec",  # tickstore index/column pco codecs (default index_compressor='pco')
                       "Cython", # tickstore.coding
                      ],
     # Note: pytest >= 4.1.0 is not compatible with pytest-cov < 2.6.1.

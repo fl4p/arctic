@@ -16,7 +16,8 @@ from pymongo.errors import OperationFailure
 from pymongo.results import InsertManyResult
 
 from .coding import nparray_varint_encode, nparray_varint_decode, decode_logQ16_10_dzv, \
-    LnQ16_VQL, LnQ16_zlib, binary_compressors, LnQ16
+    LnQ16_VQL, LnQ16_zlib, binary_compressors, binary_decompressors, LnQ16, LnQ16_pco, \
+    pco_encode, pco_decode
 
 try:
     from pandas.core.frame import _arrays_to_mgr
@@ -164,6 +165,20 @@ register_codec('LnQ185VQLgz', LnQ16_VQL('gz', 1.85, 0, 0))  # for px 16ppm, down
 _LnQ30brW10q10 = LnQ16_VQL('br_w10q10', loq_loss=30, log_prescale=20, loq_preadd=1e-12)
 _LnQ30brW10q10.rtol_max = 250e-6  # loss=30 inherent error ~232ppm; default 200ppm would fail verify
 register_codec('LnQ30brW10q10', _LnQ30brW10q10)
+
+# Same loss=30 grid (~232ppm) as LnQ30brW10q10, but the int stream goes through pcodec (the `pco`
+# crate) instead of delta+varint+brotli. ~equal size on L2, but encodes ~37x cheaper and decodes ~3x
+# faster -- the better write-once/read-many choice. Requires the optional `pcodec` package; the codec
+# only imports it on first encode/decode, so registration here is import-safe without it.
+_LnQ30pco = LnQ16_pco(loq_loss=30, log_prescale=20, loq_preadd=1e-12)
+_LnQ30pco.rtol_max = 250e-6  # loss=30 inherent error ~232ppm; default 200ppm would fail verify
+register_codec('LnQ30pco', _LnQ30pco)
+
+# Signed pcodec codec for trade qty (carries a sign): same grid as LnQ15br9 (loss=15, ~115ppm) but the
+# signed int stream goes through pcodec. On realistic qty (lognormal magnitudes + autocorrelated sign)
+# it is ~14% smaller than LnQ15br9 and ~10x cheaper to encode. loss=15 -> 115ppm < 200ppm default, so
+# no rtol_max override. Requires the optional `pcodec` package (lazily imported on first use).
+register_codec('LnQ15pcoS', LnQ16_pco(loq_loss=15, log_prescale=37, loq_preadd=1e-4, signed=True))
 
 
 def index_to_ns(series, dtype=np.int64):
@@ -813,13 +828,23 @@ class TickStore(object):
             raise ArcticException("Unhandled document version: %s" % doc[VERSION])
         # if doc.get(INDEX_PRECISION, 'ms') != self._index_precision:
         #    raise ArcticException("Unexpected index precision: %s" % doc.get(INDEX_PRECISION, 'ms'))
-        # np.cumsum copies the read-only array created with frombuffer
-        buf = lz4_decompress(doc[INDEX])
-        if doc[VERSION] == 4:
-            idx = nparray_varint_decode(buf)
+        # np.cumsum copies the read-only array created with frombuffer.
+        # INDEX_COMPRESSION selects the index codec; absent -> 'lz4' (the legacy default). 'pco' stores
+        # the uint64 delta array directly with pcodec (no varint/lz4 wrapping); any other value is a
+        # byte->byte compressor from binary_decompressors wrapping the version-keyed varint/raw layout.
+        index_compression = doc.get(INDEX_COMPRESSION, 'lz4')
+        if index_compression == 'pco':
+            idx = pco_decode(doc[INDEX])  # uint64 deltas (idx[0] is the absolute first stamp)
         else:
-            idx = np.frombuffer(buf, dtype='uint64')
-        del buf
+            decompress = binary_decompressors.get(index_compression)
+            if decompress is None:
+                raise ArcticException("Unknown index compression: %s" % index_compression)
+            buf = decompress(doc[INDEX])
+            if doc[VERSION] == 4:
+                idx = nparray_varint_decode(buf)
+            else:
+                idx = np.frombuffer(buf, dtype='uint64')
+            del buf
         # Defence-in-depth on read: idx[0] is the absolute first stamp and idx[1:] are the deltas,
         # stored as int64 reinterpreted to uint64 (so the old `idx[1:].min() >= 0` check on uint64 was
         # always true and caught nothing). View the deltas back as signed: a negative one means a
@@ -987,7 +1012,8 @@ class TickStore(object):
                     symbol + " Document already exists with start:{} end:{} in the range of our start:{} end:{}".format(
                         doc[START], doc[END], start, end))
 
-    def write(self, symbol, data, initial_image=None, metadata=None, to_dtype=None, codec=None):
+    def write(self, symbol, data, initial_image=None, metadata=None, to_dtype=None, codec=None,
+              index_compressor='pco'):
         """
         Writes a list of market data events.
 
@@ -1005,6 +1031,12 @@ class TickStore(object):
             assumed to be the time of the timestamp of the index
         metadata: dict
             optional user defined metadata - one per symbol
+        index_compressor : str
+            codec for the timestamp index. 'pco' (default; pcodec, lossless, ~0.9 B/val on irregular
+            tick indices vs ~1.7 for lz4, near-free on a regular grid) or 'lz4' (the legacy layout).
+            The codec is recorded per-bucket, so reads pick it up automatically and existing lz4 buckets
+            keep reading unchanged. Note 'pco' is the default, so the `pcodec` package is required to
+            write (and to read newly-written data); pass index_compressor='lz4' to avoid the dependency.
         """
         pandas = isinstance(data, pd.DataFrame)
 
@@ -1015,9 +1047,11 @@ class TickStore(object):
         if pandas:
             # assert codec is None
             # assert self._index_precision is None or self._index_precision == 'ms'
-            buckets = self._pandas_to_buckets(data, symbol, initial_image, to_dtype=to_dtype, codec=codec)
+            buckets = self._pandas_to_buckets(data, symbol, initial_image, to_dtype=to_dtype, codec=codec,
+                                              index_compressor=index_compressor)
         else:
-            buckets = self._to_buckets(data, symbol, initial_image, to_dtype=to_dtype, codec=codec)
+            buckets = self._to_buckets(data, symbol, initial_image, to_dtype=to_dtype, codec=codec,
+                                       index_compressor=index_compressor)
 
         self._write(buckets)
 
@@ -1060,14 +1094,15 @@ class TickStore(object):
         rate = int(ticks / t) if t != 0 else float("nan")
         logger.debug("%d buckets in %s: approx %s ticks/sec" % (len(buckets), t, rate))
 
-    def _pandas_to_buckets(self, x, symbol, initial_image, to_dtype=None, codec=None):
+    def _pandas_to_buckets(self, x, symbol, initial_image, to_dtype=None, codec=None, index_compressor='pco'):
         rtn = []
         idx_prec = self._index_quant_ns
         for i in range(0, len(x), self._chunk_size):
             bucket, initial_image = TickStore._to_bucket_pandas(x.iloc[i:i + self._chunk_size], symbol, initial_image,
                                                                 index_precision=idx_prec,
                                                                 to_dtype=to_dtype, codec=codec,
-                                                                verify_codec=self._verify_codec)
+                                                                verify_codec=self._verify_codec,
+                                                                index_compressor=index_compressor)
             rtn.append(bucket)
         return rtn
 
@@ -1088,14 +1123,15 @@ class TickStore(object):
             raise ValueError("unrecognized index_precision %s" % prec)
         return i
 
-    def _to_buckets(self, x, symbol, initial_image, to_dtype=None, codec=None):
+    def _to_buckets(self, x, symbol, initial_image, to_dtype=None, codec=None, index_compressor='pco'):
         rtn = []
         idx_prec = self._index_quant_ns
         for i in range(0, len(x), self._chunk_size):
             bucket, initial_image = TickStore._to_bucket(x[i:i + self._chunk_size], symbol, initial_image,
                                                          index_precision=idx_prec,
                                                          to_dtype=to_dtype, codec=codec,
-                                                         verify_codec=self._verify_codec)
+                                                         verify_codec=self._verify_codec,
+                                                         index_compressor=index_compressor)
             rtn.append(bucket)
         return rtn
 
@@ -1397,7 +1433,7 @@ class TickStore(object):
 
     @staticmethod
     def _to_bucket(ticks, symbol, initial_image, index_precision='ms', to_dtype=None, codec=None, verify_codec=True,
-                   varint_coding=False):
+                   varint_coding=False, index_compressor='pco'):
         # index_precision may be given as an ns int (internal callers) or as a precision spec
         # ('ms', 's', '<n>s', ...) -> normalize to ns. varint_coding selects the on-disk index layout:
         # True -> varint-encoded deltas (version-4 chunk), False (default) -> raw uint64 deltas
@@ -1496,13 +1532,19 @@ class TickStore(object):
         # varint, version 3 -> raw uint64. index_vlq drives the version in _bucket_head, but a gain
         # (to_dtype downcast) or codec can have bumped VERSION to 4 since then, so key off the final
         # VERSION here rather than index_vlq alone.
-        use_varint = rtn[VERSION] == CHUNK_VERSION_NUMBER_MAX
-        rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if use_varint else idx.tobytes()))
+        if index_compressor == 'pco':
+            rtn[INDEX_COMPRESSION] = 'pco'
+            rtn[VERSION] = max(rtn[VERSION], CHUNK_VERSION_NUMBER_MAX)
+            rtn[INDEX] = Binary(pco_encode(idx))
+        else:
+            assert index_compressor == 'lz4', ("unsupported index_compressor %s" % index_compressor)
+            use_varint = rtn[VERSION] == CHUNK_VERSION_NUMBER_MAX
+            rtn[INDEX] = Binary(lz4_compressHC(nparray_varint_encode(idx) if use_varint else idx.tobytes()))
         return rtn, final_image
 
     @staticmethod
     def _to_bucket_pandas(df, symbol, initial_image, index_precision, to_dtype=None, codec=None, verify_codec=True,
-                          binary_class=Binary, index_compressor='lz4'):
+                          binary_class=Binary, index_compressor='pco'):
         rtn, index_vlq = TickStore._bucket_head(df, symbol, initial_image, index_precision, codec)
         tr = [to_dt(df.index[0]), to_dt(df.index[-1])]
 
@@ -1538,13 +1580,26 @@ class TickStore(object):
         # now it is safe to to an unsafe reinterpreting cast of the int64 to uint64
         idx = idx.view(np.uint64)  # no cost O(0)
 
-        compressor = binary_compressors.get(index_compressor)
-        assert compressor is not None, ("unknown compressor %s" % index_compressor)
-        if index_compressor != 'lz4':
+        # INDEX_COMPRESSION selects the INDEX codec only. The rowmask bitmaps are always lz4: the read
+        # path (_decode_bucket) lz4-decompresses them unconditionally, and pco is a numeric-array codec
+        # that cannot compress the packed-bit bytes anyway.
+        #   'pco'  -> the uint64 delta array straight through pcodec (lossless, ~0.9 B/val on irregular
+        #             tick indices vs ~1.7 for lz4(diff); near-free on a regular grid).
+        #   else   -> a byte->byte compressor from binary_compressors wrapping the version-keyed layout
+        #             (varint deltas for v4, raw uint64 for v3).
+        row_compressor = binary_compressors['lz4']
+        if index_compressor == 'pco':
             assert INDEX_COMPRESSION not in rtn
-            rtn[INDEX_COMPRESSION] = index_compressor
-
-        rtn[INDEX] = binary_class(compressor(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
+            rtn[INDEX_COMPRESSION] = 'pco'
+            rtn[VERSION] = max(rtn[VERSION], CHUNK_VERSION_NUMBER_MAX)
+            rtn[INDEX] = binary_class(pco_encode(idx))
+        else:
+            compressor = binary_compressors.get(index_compressor)
+            assert compressor is not None, ("unknown compressor %s" % index_compressor)
+            if index_compressor != 'lz4':
+                assert INDEX_COMPRESSION not in rtn
+                rtn[INDEX_COMPRESSION] = index_compressor
+            rtn[INDEX] = binary_class(compressor(nparray_varint_encode(idx) if index_vlq else idx.tobytes()))
 
         for k in df.columns:
             val = df[k].values
@@ -1558,7 +1613,7 @@ class TickStore(object):
                                                             dbg_ctx=(symbol, k, tr))
             rtn[COLUMNS][k] = {DATA: binary_class(enc),
                                DTYPE: dtype,
-                               ROWMASK: binary_class(compressor(np.packbits(rm).tobytes()))}
+                               ROWMASK: binary_class(row_compressor(np.packbits(rm).tobytes()))}
             if codec_sel:
                 rtn[COLUMNS][k][CODEC] = codec_sel
             if gain:

@@ -35,9 +35,21 @@ def _autocorr_price(n, seed=1):
     return (50000 * np.exp(np.cumsum(rng.normal(0, 1e-4, n)))).astype(np.float32)
 
 
+try:
+    import pcodec  # noqa: F401  -- optional dependency for the LnQ*pco codecs
+    HAVE_PCO = True
+except ImportError:
+    HAVE_PCO = False
+
+# codecs that need the optional `pcodec` package; skipped when it isn't installed
+_PCO_CODECS = {'LnQ30pco', 'LnQ15pcoS'}
+
+
 # --- every registered codec round-trips within its declared tolerance ------------
 @pytest.mark.parametrize("name", sorted(codec_registry))
 def test_registered_codec_roundtrip(name):
+    if name in _PCO_CODECS and not HAVE_PCO:
+        pytest.skip("pcodec not installed")
     code = codec_registry[name]
     a = _logspace(20000)
     dec = code.decode(code.encode(a))
@@ -67,6 +79,97 @@ def test_br_w10q10_compressor_roundtrips():
     assert 'br_w10q10' in binary_compressors and 'br_w10q10' in binary_decompressors
     payload = b'\x00\x01\x02\x03' * 5000
     assert binary_decompressors['br_w10q10'](binary_compressors['br_w10q10'](payload)) == payload
+
+
+# --- LnQ30pco (pcodec back-end, same loss=30 grid as LnQ30brW10q10) ---------------
+pco_required = pytest.mark.skipif(not HAVE_PCO, reason="pcodec not installed")
+
+
+def test_LnQ30pco_registered_and_budget():
+    code = codec_registry['LnQ30pco']
+    assert code.rtol_max == 250e-6  # loss=30 grid, same as LnQ30brW10q10
+
+
+@pco_required
+def test_LnQ30pco_roundtrip_within_budget():
+    code = codec_registry['LnQ30pco']
+    a = _logspace(50000)
+    dec = code.decode(code.encode(a))
+    rtol = float(np.max(np.abs(dec - a) / (np.abs(a) + code.rtol_reg)))
+    assert rtol < 250e-6
+
+
+@pco_required
+def test_LnQ30pco_same_error_as_brW10q10():
+    # identical ln_q16 quantization grid -> identical error, only the entropy stage differs
+    a = _autocorr_price(50000)
+    pco = codec_registry['LnQ30pco']
+    br = codec_registry['LnQ30brW10q10']
+    e_pco = float(np.max(np.abs(pco.decode(pco.encode(a)) - a) / (np.abs(a) + pco.rtol_reg)))
+    e_br = float(np.max(np.abs(br.decode(br.encode(a)) - a) / (np.abs(a) + br.rtol_reg)))
+    assert abs(e_pco - e_br) < 1e-6, (e_pco, e_br)
+
+
+@pco_required
+def test_LnQ30pco_smaller_than_baseline():
+    a = _autocorr_price(50000)
+    new = len(codec_registry['LnQ30pco'].encode(a))
+    base = len(codec_registry['LnQ20VQLgz'].encode(a))
+    assert new < base, (new, base)
+
+
+@pco_required
+def test_LnQ30pco_rejects_nonfinite():
+    a = np.array([1.0, np.nan, 3.0], dtype=np.float32)
+    with pytest.raises(ValueError):
+        codec_registry['LnQ30pco'].encode(a)
+
+
+def test_LnQ30pco_unavailable_raises_importerror_on_use():
+    # registration is import-safe without pcodec; a *use* without it must fail clearly, not silently.
+    if HAVE_PCO:
+        pytest.skip("pcodec installed; cannot exercise the missing-dependency path")
+    with pytest.raises(ImportError):
+        codec_registry['LnQ30pco'].encode(_logspace(100))
+
+
+@pco_required
+def test_LnQ15pcoS_signed_roundtrip():
+    # signed trade-qty codec: quantize magnitude, carry the sign; both signs must round-trip < 200ppm.
+    code = codec_registry['LnQ15pcoS']
+    rng = np.random.default_rng(0)
+    mag = (10 ** rng.normal(0, 1.2, 50000)).astype(np.float32)
+    a = (mag * np.where(rng.random(50000) < 0.5, -1, 1)).astype(np.float32)
+    assert (a < 0).any() and (a > 0).any()
+    dec = code.decode(code.encode(a))
+    assert np.array_equal(np.sign(dec), np.sign(a))            # sign preserved exactly
+    rtol = float(np.max(np.abs(dec - a) / (np.abs(a) + code.rtol_reg)))
+    assert rtol < code.rtol_max
+
+
+@pco_required
+def test_LnQ30pco_rejects_negative_input():
+    # the positive (default) pco codec must reject signed input rather than silently mis-store it.
+    a = np.array([1.0, -2.0, 3.0], dtype=np.float32)
+    with pytest.raises(AssertionError):
+        codec_registry['LnQ30pco'].encode(a)
+
+
+@pco_required
+def test_full_bucket_roundtrip_LnQ30pco():
+    n = 5000
+    idx = pd.date_range('2026-01-01', periods=n, freq='5s', tz='UTC')
+    df = pd.DataFrame({'volAt40': _logspace(n, seed=3), 'vwapBid': _autocorr_price(n)}, index=idx)
+    bucket, _ = TickStore._to_bucket_pandas(df, 'SYM', None, 1_000_000,
+                                            codec='LnQ30pco', verify_codec=True)
+    fake_self = types.SimpleNamespace(_index_precision='ms')
+    rtn = TickStore._decode_bucket(fake_self, bucket, set(df.columns), {},
+                                   include_symbol=False, include_images=False, columns=None)
+    for c in df.columns:
+        orig = df[c].values.astype(np.float64)
+        got = np.asarray(rtn[c], dtype=np.float64)
+        rtol = float(np.max(np.abs(got - orig) / (np.abs(orig) + 1e-10)))
+        assert rtol < 250e-6, (c, rtol)
 
 
 # --- #5 non-finite input is rejected, not silently corrupted ---------------------
@@ -148,6 +251,88 @@ def test_codec_float32_input_ok():
     a = _logspace(1000)  # float32
     out = TickStore._encode(a, 'px', None, 'LnQ20VQLgz', True, dbg_ctx=('s', 'px', None))
     assert out[1] == 'LnQ20VQLgz'  # codec kept, verify passed against original
+
+
+# --- index compressor (INDEX_COMPRESSION): pco + the generalized read path -------
+def _irregular_index(n, seed=3):
+    """Bursty ms-resolution tick index with jitter + occasional gaps (not a regular grid)."""
+    rng = np.random.default_rng(seed)
+    gaps = rng.exponential(40, n).astype('int64')
+    m = rng.random(n) < 0.02
+    gaps[m] += rng.integers(1000, 60000, m.sum())
+    idx_ms = np.cumsum(gaps) + 1_700_000_000_000
+    return pd.to_datetime(idx_ms, unit='ms', utc=True)
+
+
+def _index_roundtrip(index_compressor, codec=None, n=20000):
+    idx = _irregular_index(n)
+    df = pd.DataFrame({'volAt40': _logspace(n, seed=4), 'vwapBid': _autocorr_price(n)}, index=idx)
+    bucket, _ = TickStore._to_bucket_pandas(df, 'SYM', None, 1_000_000, codec=codec,
+                                            verify_codec=True, index_compressor=index_compressor)
+    fake_self = types.SimpleNamespace(_index_precision='ms')
+    rtn = TickStore._decode_bucket(fake_self, bucket, set(df.columns), {},
+                                   include_symbol=False, include_images=False, columns=None)
+    got = pd.to_datetime(np.asarray(rtn['i']) * 1_000_000, utc=True)
+    return bucket, df, idx, got, rtn
+
+
+@pytest.mark.parametrize("index_compressor", ['lz4', 'gz', 'lzma'])
+def test_index_compressor_byte_codecs_roundtrip(index_compressor):
+    # lz4 is the legacy default; gz/lzma exercise the generalized read path (previously the read
+    # hardcoded lz4 and silently broke a non-lz4 index -- regression guard for that fix).
+    bucket, df, idx, got, _ = _index_roundtrip(index_compressor)
+    assert np.array_equal(got.view('int64'), idx.view('int64'))
+    # only a non-default codec records the field
+    assert bucket.get('d') == (None if index_compressor == 'lz4' else index_compressor)
+
+
+@pco_required
+def test_index_compressor_pco_roundtrip_lossless():
+    bucket, df, idx, got, _ = _index_roundtrip('pco')
+    assert bucket['d'] == 'pco'                      # INDEX_COMPRESSION recorded
+    assert np.array_equal(got.view('int64'), idx.view('int64'))   # lossless, exact
+
+
+@pco_required
+def test_index_compressor_pco_smaller_than_lz4():
+    big = 50000
+    b_pco, *_ = _index_roundtrip('pco', n=big)
+    b_lz4, *_ = _index_roundtrip('lz4', n=big)
+    assert len(b_pco['i']) < len(b_lz4['i']), (len(b_pco['i']), len(b_lz4['i']))
+
+
+@pco_required
+def test_index_pco_composes_with_column_pco():
+    # pco index + pco column in the same bucket: independent codecs, both round-trip.
+    bucket, df, idx, got, rtn = _index_roundtrip('pco', codec='LnQ30pco')
+    assert bucket['d'] == 'pco'
+    assert np.array_equal(got.view('int64'), idx.view('int64'))
+    for c in df.columns:
+        orig = df[c].values.astype(np.float64)
+        rtol = float(np.max(np.abs(np.asarray(rtn[c], dtype=np.float64) - orig) / (np.abs(orig) + 1e-10)))
+        assert rtol < 250e-6, (c, rtol)
+
+
+def test_legacy_bucket_without_index_compression_reads_as_lz4():
+    # a bucket missing the INDEX_COMPRESSION field must still decode (defaults to lz4) -- back-compat.
+    bucket, df, idx, got, _ = _index_roundtrip('lz4')
+    assert 'd' not in bucket  # legacy layout: field absent
+    assert np.array_equal(got.view('int64'), idx.view('int64'))
+
+
+@pco_required
+def test_index_pco_via_ticks_path():
+    n = 2000
+    idx = _irregular_index(n, seed=9)
+    px = _autocorr_price(n)
+    ticks = [{'index': pd.Timestamp(t), 'px': float(p)} for t, p in zip(idx, px)]
+    bucket, _ = TickStore._to_bucket(ticks, 'SYM', None, index_precision=1_000_000, index_compressor='pco')
+    assert bucket['d'] == 'pco'
+    fake_self = types.SimpleNamespace(_index_precision='ms')
+    rtn = TickStore._decode_bucket(fake_self, bucket, {'px'}, {},
+                                   include_symbol=False, include_images=False, columns=None)
+    got = pd.to_datetime(np.asarray(rtn['i']) * 1_000_000, utc=True)
+    assert np.array_equal(got.view('int64'), idx.view('int64'))
 
 
 # --- full write->read bucket serialization (no mongo) ----------------------------

@@ -320,3 +320,84 @@ class LnQ16:
         f = np.abs(i).astype(np.float32)
         f = e_q16(f, self.loq_loss, prescale=self.loq_prescale, preadd=self.loq_preadd) * np.sign(i)
         return f
+
+
+_pco_cfg = None  # cached (module, ChunkConfig) once pcodec is imported
+
+
+def _pco():
+    """Lazily import pcodec (the `pco` crate's Python binding). Optional dependency: the codec module
+    must load without it; only an actual LnQ16_pco encode/decode requires it."""
+    global _pco_cfg
+    if _pco_cfg is None:
+        try:
+            from pcodec import standalone, ChunkConfig
+        except ImportError as e:
+            raise ImportError("pcodec is required here (pip install pcodec)") from e
+        _pco_cfg = (standalone, ChunkConfig)
+    return _pco_cfg
+
+
+def pco_encode(arr, level=8):
+    """Compress a 1D numpy integer/float array with pcodec. Returns a self-describing standalone blob
+    (dtype is recorded inside it). Used for the LnQ16_pco column codec and the pco index compressor."""
+    standalone, ChunkConfig = _pco()
+    return standalone.simple_compress(np.ascontiguousarray(arr), ChunkConfig(compression_level=level))
+
+
+def pco_decode(buf):
+    """Inverse of pco_encode -- returns the numpy array in its original dtype."""
+    standalone, _ = _pco()
+    return standalone.simple_decompress(buf)
+
+
+class LnQ16_pco:
+    """Log-quantize like LnQ16_VQL, then store the integer stream with pcodec (the `pco` crate) instead
+    of delta+zigzag+varint+gz/brotli.
+
+    Same `ln_q16` quantization grid as the LnQ16_* family -> identical relative error for a given loss
+    (loss x 7.7 ppm). pcodec does its own delta detection and adaptive bin-packing, so on real L2 data
+    it lands ~18-32% smaller than LnQ20VQLgz at the same error and encodes ~5-40x faster (decode ~2x).
+    Trade-off vs LnQ30brW10q10: similar size, far cheaper CPU.
+
+    signed=False: positive inputs only (prices/sizes). signed=True: mirrors LnQ16 -- quantize the
+    magnitude, carry the sign on the int (pco compresses signed int32 natively) -- for signed trade qty.
+    """
+
+    def __repr__(self):
+        s = 'S' if self._signed else ''
+        return f'LnQ16_pco{s}({self.loq_loss},{self.loq_prescale},{self.loq_preadd},lvl={self.level})'
+
+    def __init__(self, loq_loss=30, log_prescale=20, loq_preadd=1e-12, level=8, signed=False):
+        self.loq_loss = loq_loss
+        self.loq_prescale = log_prescale
+        self.loq_preadd = loq_preadd
+        self.level = level
+        self._signed = signed
+        self.rtol_reg = 1e-10
+        self.rtol_max = 200e-6
+
+    def encode(self, arr):
+        _assert_finite(arr, 'LnQ16_pco.encode')  # before arr.min(), else NaN trips the assert below
+        if not self._signed:
+            assert arr.min() >= 0, arr.min()
+        i = ln_q16(np.abs(arr) if self._signed else arr, self.loq_loss,
+                   prescale=self.loq_prescale, preadd=self.loq_preadd)
+        assert math.isfinite(i.max()), ("code overflow", arr[np.argmax(i)])
+        if self._signed:
+            if i.min() < 0:
+                j = int(np.argmin(i))
+                raise ValueError('input[%s] %s underflows the codec floor (maps to %s<0)' % (j, arr[j], i[j]))
+            i = i * np.sign(arr).astype(i.dtype)
+        return pco_encode(i.astype(np.int32), level=self.level)
+
+    def decode(self, buf):
+        i = pco_decode(buf)
+        if self._signed:
+            f = e_q16(np.abs(i).astype(np.float32), self.loq_loss, self.loq_prescale,
+                      preadd=self.loq_preadd) * np.sign(i)
+            f = f.astype(np.float32)
+        else:
+            f = e_q16(i.astype(np.float32), self.loq_loss, self.loq_prescale, preadd=self.loq_preadd)
+        assert f.dtype == np.float32
+        return f

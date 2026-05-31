@@ -64,7 +64,8 @@ codec whose `loss` implies >`rtol_max` error must set `rtol_max` accordingly (se
 | `LnQ185VQLgz`  | `LnQ16_VQL(loss=1.85, gz, prescale=0, preadd=0)` | 16 ppm | gz | prices, down to 1e-45 |
 | `LnQ15gz`      | `LnQ16_zlib(loss=15)` (int32) | 115 ppm | gz | signed qty / volume (no autocorr) |
 | `LnQ15br9`     | `LnQ16(br_9, loss=15)` (int32) | 115 ppm | brotli q9 | qty, abs(x) ≥ 0.73e-11 |
-| `LnQ30brW10q10`| `LnQ16_VQL(loss=30, br_w10q10, prescale=20, preadd=1e-12)`, `rtol_max=250e-6` | 232 ppm | brotli q10/lgwin10 | **smallest** general L2 |
+| `LnQ30brW10q10`| `LnQ16_VQL(loss=30, br_w10q10, prescale=20, preadd=1e-12)`, `rtol_max=250e-6` | 232 ppm | brotli q10/lgwin10 | smallest general L2 (slow encode) |
+| `LnQ30pco`     | `LnQ16_pco(loss=30, prescale=20, preadd=1e-12)`, `rtol_max=250e-6` | 232 ppm | pcodec (`pco` crate) | **general L2**, ~same size as brW10q10, ~37× cheaper encode |
 
 ### `LnQ30brW10q10` — the size-optimal general codec
 
@@ -81,6 +82,53 @@ Found by a sweep over the structural knobs on real L2 data (`find_coders.py` in 
 Tradeoff at loss=20, real L2 data: `lzma` int32 (79%, slow decode) ≈ `brotli` VQL (81%, fast decode)
 < `zstd` VQL (89%) < `gz` (100%). Brotli was the best size **and** decode point; zstd never reached
 brotli's size; lzma matched it but decodes ~2.5× slower.
+
+### `LnQ30pco` — same error, far cheaper than brotli
+
+`LnQ16_pco` keeps the **exact** `ln_q16(loss=30)` quantization grid (so its error is identical to
+`LnQ30brW10q10`, 232 ppm) but stores the integer stream with **pcodec** (the `pco` crate) instead of
+delta+zigzag+varint+brotli. pcodec does its own delta detection and adaptive bin-packing, so:
+
+- **Size:** ~equal to `LnQ30brW10q10` on L2 (within a couple %), ~18–32% smaller than `LnQ20VQLgz`.
+- **Speed:** encodes ~**37× faster** than brotli q10 and decodes ~**3× faster** — the better
+  write-once/read-many *and* re-encode-heavy choice. (Brotli q10 spends most of its CPU on a large
+  context model that the short-range delta stream barely uses.)
+- pcodec also rediscovers the log structure on its own: feeding it *mantissa-rounded floats* (no
+  `ln_q16` at all) gets within a few % of the same size.
+
+`pcodec` is an **optional dependency** (`pip install pcodec`). The codec registers without it; only an
+actual encode/decode imports it, and raises a clear `ImportError` if it is missing. So a deployment
+that never selects `LnQ30pco` needs nothing extra. The on-disk blob is pco-format (like every other
+TickStore column blob, it is only readable by TickStore — not a regression).
+
+> **Lossless option.** pcodec also stores raw float32 losslessly at ~1.5 B/value (vs lz4's ~3.7),
+> which none of the `LnQ*` codecs offer. Not registered as a TickStore codec (the column path is
+> inherently lossy-or-lz4), but it is the strongest lossless float option if ever needed — see
+> `find_coders.py --pco`.
+
+## Index compression (`index_compressor`)
+
+`codec` compresses the column *values*; the timestamp **index** is a separate stream with its own
+codec, selected by `write(..., index_compressor=...)`:
+
+```python
+ts.write('XBTUSD@bitmex', df, codec='LnQ30pco', index_compressor='pco')
+```
+
+- `'lz4'` (default) — the legacy layout: `lz4(first_stamp + int64-or-varint deltas)`. Unchanged; all
+  existing buckets read back identically.
+- `'pco'` — store the uint64 delta array straight through **pcodec** (lossless, integer-exact). On a
+  realistic irregular tick index it is ~**0.9 B/val vs ~1.7** for lz4 (~48% smaller on a large bucket)
+  and on a regular grid it is essentially free (pco detects the constant stride). Encodes ~20× faster
+  and decodes ~3× faster than the lz4(diff) path. Requires the optional `pcodec` package.
+
+The codec is recorded per bucket in the `INDEX_COMPRESSION` field, so reads pick it up automatically —
+no argument needed on `read()`. A bucket with no field defaults to lz4. The index codec is independent
+of the column `codec`: any combination works (e.g. `pco` index + `LnQ30pco` columns). The per-column
+**rowmask** bitmaps are always lz4 regardless (pco is a numeric-array codec, not a byte compressor).
+
+> Byte compressors (`gz`, `lzma`, …) are also accepted for the index and now round-trip correctly
+> (the read path was previously hardcoded to lz4); pco is the recommended non-lz4 choice.
 
 ## Constraints
 
@@ -107,6 +155,6 @@ brotli's size; lzma matched it but decodes ~2.5× slower.
    codecs are write-deprecated but still decode via `_decode_bucket`).
 
 Benchmark harness: `test/coding/find_coders.py` (jnb repo) — `--raw` (un-quantized influx data),
-`--frontier` (loss/size/error sweep), `--brotli` (quality×lgwin×mode grid), `--pickle <path>` (load a
-dumped dataset, e.g. to run zstd under a Python 3.14 venv). Regression tests:
-`tests/unit/tickstore/test_codec_lossy.py`.
+`--frontier` (loss/size/error sweep), `--brotli` (quality×lgwin×mode grid), `--pco` (pcodec lossless
++ lossy vs the LnQ baselines), `--pickle <path>` (load a dumped dataset, e.g. to run zstd/pco under a
+specific venv). Regression tests: `tests/unit/tickstore/test_codec_lossy.py`.
