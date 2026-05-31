@@ -142,7 +142,22 @@ def _define_compat_pickle_load():
     """
     if pd.__version__.startswith("0.14"):
         return pickle.load
-    return pickle_compat.load
+    load = getattr(pickle_compat, 'load', None)
+    if load is not None:
+        return load
+    # pandas >= 2.0 dropped pickle_compat.load (the file-object loader) but kept its compat
+    # Unpickler, which still applies pandas' class-relocation shims for legacy pickles. Wrap it to
+    # restore the old load(fileobj, encoding=...) signature the callers use; fall back to plain
+    # pickle if even the Unpickler is gone.
+    unpickler = getattr(pickle_compat, 'Unpickler', None)
+    if unpickler is not None:
+        def _compat_load(fo, encoding='ASCII'):
+            return unpickler(fo, encoding=encoding).load()
+        return _compat_load
+
+    def _plain_load(fo, encoding='ASCII'):
+        return pickle.load(fo, encoding=encoding)
+    return _plain_load
 
 
 def analyze_symbol(instance, sym, from_ver, to_ver, do_reads=False):
