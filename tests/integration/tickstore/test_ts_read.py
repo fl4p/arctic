@@ -702,29 +702,38 @@ def test_objects_fail(tickstore_lib):
 def test_symbols_in_range(tickstore_lib):
     # SYMA spans 2013-01-01..2013-01-03 and has columns a, b, c.
     # SYMB spans 2013-01-04..2013-01-05 and has columns b, c (no 'a').
+    # OTHER reuses SYMB's span but sits under a different name prefix.
     tickstore_lib.write('SYMA', DUMMY_DATA[:3])
     tickstore_lib.write('SYMB', DUMMY_DATA[3:])
+    tickstore_lib.write('OTHER', DUMMY_DATA[3:])
 
     # No range, no columns: every symbol.
-    assert tickstore_lib.symbols_in_range() == ['SYMA', 'SYMB']
+    assert tickstore_lib.symbols_in_range() == ['OTHER', 'SYMA', 'SYMB']
 
     # Range that only overlaps SYMA's chunk.
     assert tickstore_lib.symbols_in_range(DateRange(20130101, 20130102)) == ['SYMA']
-    # Range that only overlaps SYMB's chunk.
-    assert tickstore_lib.symbols_in_range(DateRange(20130104, 20130106)) == ['SYMB']
-    # Range that overlaps both.
-    assert tickstore_lib.symbols_in_range(DateRange(20130103, 20130104)) == ['SYMA', 'SYMB']
+    # Range that overlaps the later chunk shared by SYMB and OTHER.
+    assert tickstore_lib.symbols_in_range(DateRange(20130104, 20130106)) == ['OTHER', 'SYMB']
+    # Range that overlaps everything.
+    assert tickstore_lib.symbols_in_range(DateRange(20130103, 20130104)) == ['OTHER', 'SYMA', 'SYMB']
     # Range before any data.
     assert tickstore_lib.symbols_in_range(DateRange(20120101, 20121231)) == []
 
     # Column filter: only SYMA carries 'a'.
     assert tickstore_lib.symbols_in_range(columns='a') == ['SYMA']
     assert tickstore_lib.symbols_in_range(columns=['a']) == ['SYMA']
-    # Both carry b and c.
-    assert tickstore_lib.symbols_in_range(columns=['b', 'c']) == ['SYMA', 'SYMB']
+    # SYMA, SYMB and OTHER all carry b and c.
+    assert tickstore_lib.symbols_in_range(columns=['b', 'c']) == ['OTHER', 'SYMA', 'SYMB']
     # A column that doesn't exist anywhere.
     assert tickstore_lib.symbols_in_range(columns='zzz') == []
 
     # Range + column combined: 'a' only exists in SYMA, restricted to its range.
     assert tickstore_lib.symbols_in_range(DateRange(20130101, 20130102), columns='a') == ['SYMA']
     assert tickstore_lib.symbols_in_range(DateRange(20130104, 20130106), columns='a') == []
+
+    # regex filter on the symbol name.
+    assert tickstore_lib.symbols_in_range(regex='^SYM') == ['SYMA', 'SYMB']
+    assert tickstore_lib.symbols_in_range(regex='B$') == ['SYMB']
+    # regex combined with range and columns.
+    assert tickstore_lib.symbols_in_range(DateRange(20130104, 20130106), regex='^SYM') == ['SYMB']
+    assert tickstore_lib.symbols_in_range(columns=['b', 'c'], regex='^OTH') == ['OTHER']

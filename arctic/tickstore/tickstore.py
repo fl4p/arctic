@@ -280,7 +280,7 @@ class TickStore(object):
     def list_symbols(self, date_range=None):
         return self._collection.distinct(SYMBOL)
 
-    def symbols_in_range(self, date_range=None, columns=None):
+    def symbols_in_range(self, date_range=None, columns=None, regex=None):
         """
         List the symbols that have at least one chunk overlapping ``date_range``,
         optionally restricted to symbols holding data for the given column(s).
@@ -297,6 +297,9 @@ class TickStore(object):
             containing *every* one of these columns. Since columns are stored
             per-chunk, a symbol qualifies as long as one of its overlapping
             chunks carries all the requested columns.
+        regex : `str`
+            If given, only return symbols whose name matches this regular
+            expression (Mongo ``$regex``).
 
         Returns
         -------
@@ -312,6 +315,9 @@ class TickStore(object):
                 query[START] = {'$lte': date_range.end}
             if date_range.start is not None:
                 query[END] = {'$gte': date_range.start}
+
+        if regex is not None:
+            query[SYMBOL] = {'$regex': regex}
 
         if columns is not None:
             if isinstance(columns, str):

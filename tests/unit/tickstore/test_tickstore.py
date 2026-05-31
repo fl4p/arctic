@@ -73,6 +73,15 @@ def test_symbols_in_range_query():
     TickStore.symbols_in_range(self, DateRange(None, end))
     assert self._collection.distinct.call_args == call(SYMBOL, {START: {'$lte': end}})
 
+    # regex adds a $regex constraint on the symbol field, combining with everything else.
+    TickStore.symbols_in_range(self, regex='^SYM')
+    assert self._collection.distinct.call_args == call(SYMBOL, {SYMBOL: {'$regex': '^SYM'}})
+
+    TickStore.symbols_in_range(self, DateRange(start, end), columns='ASK', regex='^SYM')
+    assert self._collection.distinct.call_args == call(SYMBOL, {
+        START: {'$lte': end}, END: {'$gte': start},
+        SYMBOL: {'$regex': '^SYM'}, COLUMNS + '.ASK': {'$exists': True}})
+
 
 def test_mongo_date_range_query_asserts():
     self = create_autospec(TickStore)
