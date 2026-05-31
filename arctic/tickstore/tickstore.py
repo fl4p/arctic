@@ -329,48 +329,74 @@ class TickStore(object):
 
         Notes
         -----
-        With a time bound this is served by an aggregation that groups on the
-        symbol server-side -- so only the distinct names cross the wire and the
-        planner can satisfy it from the ``(SYMBOL, START, END)`` index
-        (``sy_1_s_1_e_1``) as an index-only (covered) scan -- typically a
-        DISTINCT_SCAN that hops between symbols rather than reading every chunk,
-        never loading the large per-chunk index/data blobs. Make sure that index
-        exists (it is created by ``_ensure_index``; on a pre-existing library
-        create it once by hand) or the query falls back to a full collection
-        scan that fetches every chunk document.
+        All paths key off the ``(SYMBOL, START, END)`` index (``sy_1_s_1_e_1``, created by
+        ``_ensure_index``; on a pre-existing library create it once by hand). It must lead with
+        SYMBOL: that is what lets Mongo enumerate symbols with a DISTINCT_SCAN (one key per symbol)
+        rather than a COLLSCAN that fetches every chunk document.
+
+        A ``regex`` is handled in two cheap steps rather than one slow ``$match`` over the whole
+        range. ``'^[A-Z](XBT|BTC).+'`` has no literal prefix, so it can't bound the index, and
+        ``distinct(SYMBOL, {SYMBOL: regex})`` falls back to a fetch/scan. Instead the candidates are
+        enumerated with ``[{$group: sy}, {$match: regex}]`` -- a DISTINCT_SCAN whose regex runs on the
+        small grouped set -- and the date overlap is then resolved for just those candidates with a
+        single ``{SYMBOL: {$in: candidates}, ...}`` aggregation (the ``$in`` lets the index drive one
+        seek per candidate). Doing the overlap per-symbol with separate queries instead would cost a
+        network round-trip per candidate.
         """
-        match = {}
-        if regex is not None:
-            match[SYMBOL] = {'$regex': regex}
-        if columns is not None:
-            # NB: $exists on a cs.<col> sub-path is not covered by any index, so passing
-            # columns forces document fetches. It is not the hot path; date_range/regex are.
-            if isinstance(columns, str):
-                columns = [columns]
-            for c in columns:
-                match['%s.%s' % (COLUMNS, c)] = {'$exists': True}
+        if isinstance(columns, str):
+            columns = [columns]
 
         date_range = to_pandas_closed_closed(date_range)
-        has_time_bound = date_range is not None and (date_range.start is not None
-                                                     or date_range.end is not None)
+        start = date_range.start if date_range is not None else None
+        end = date_range.end if date_range is not None else None
+        has_time_bound = start is not None or end is not None
 
-        if not has_time_bound:
-            # No time predicate -> a DISTINCT_SCAN on the (SYMBOL, START) index returns the
-            # names straight from the index without touching the (large) chunk payloads.
-            # distinct() takes filter=None when there is nothing to match on.
-            return sorted(self._collection.distinct(SYMBOL, match or None))
+        coll = self._collection
 
-        # A chunk overlaps [start, end] iff chunk.START <= end and chunk.END >= start.
-        if date_range.end is not None:
-            match[START] = {'$lte': date_range.end}
-        if date_range.start is not None:
-            match[END] = {'$gte': date_range.start}
+        def overlap_match(extra):
+            # A chunk overlaps [start, end] iff chunk.START <= end and chunk.END >= start.
+            m = dict(extra)
+            if end is not None:
+                m[START] = {'$lte': end}
+            if start is not None:
+                m[END] = {'$gte': start}
+            return m
 
-        # $group is the server-side "project to just the name": dedupe the (potentially huge)
-        # set of matching chunks down to distinct symbols on the server. Backed by the
-        # (SYMBOL, START, END) index (sy_1_s_1_e_1) this is a covered scan -- no fat chunk docs loaded.
-        pipeline = [{'$match': match}, {'$group': {'_id': '$' + SYMBOL}}]
-        return sorted(doc['_id'] for doc in self._collection.aggregate(pipeline, allowDiskUse=True))
+        if columns is not None:
+            # Strict semantics: a *single* chunk must both overlap the range and carry every
+            # requested column. $exists on a cs.<col> sub-path is not index-coverable so this scans;
+            # it is the non-hot path. Combine everything into one server-side $match + $group.
+            match = {}
+            if regex is not None:
+                match[SYMBOL] = {'$regex': regex}
+            for c in columns:
+                match['%s.%s' % (COLUMNS, c)] = {'$exists': True}
+            pipeline = [{'$match': overlap_match(match)}, {'$group': {'_id': '$' + SYMBOL}}]
+            return sorted(doc['_id'] for doc in coll.aggregate(pipeline, allowDiskUse=True))
+
+        if regex is not None:
+            # Enumerate candidates index-only: $group on SYMBOL is a DISTINCT_SCAN (one key per
+            # symbol); the regex is applied AFTER the group, on the small grouped set, so it does
+            # not defeat the index the way distinct(SYMBOL, {sy: regex}) does.
+            candidates = [doc['_id'] for doc in coll.aggregate(
+                [{'$group': {'_id': '$' + SYMBOL}}, {'$match': {'_id': {'$regex': regex}}}],
+                allowDiskUse=True)]
+            if not has_time_bound:
+                return sorted(candidates)
+            if not candidates:
+                return []
+            # Resolve the date overlap for just those candidates in a single round trip; $in lets
+            # the (SYMBOL, START, END) index seek per candidate instead of scanning the whole range.
+            base = {SYMBOL: {'$in': candidates}}
+        elif not has_time_bound:
+            # No regex, no time bound -> plain DISTINCT_SCAN over every symbol.
+            return sorted(coll.distinct(SYMBOL))
+        else:
+            # No regex but a time bound -> overlap over all symbols (uses the START/END indexes).
+            base = {}
+
+        pipeline = [{'$match': overlap_match(base)}, {'$group': {'_id': '$' + SYMBOL}}]
+        return sorted(doc['_id'] for doc in coll.aggregate(pipeline, allowDiskUse=True))
 
     def _mongo_date_range_query(self, symbol, date_range):
         # Handle date_range
