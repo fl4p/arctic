@@ -203,10 +203,16 @@ class TickStore(object):
     @mongo_retry
     def _ensure_index(self):
         collection = self._collection
-        collection.create_index([(SYMBOL, pymongo.ASCENDING),
-                                 (START, pymongo.ASCENDING)], background=True)  # this can be made unique
         collection.create_index([(START, pymongo.ASCENDING)], background=True)
         collection.create_index([(END, pymongo.ASCENDING)], background=True)
+        # (SYMBOL, START, END), name "sy_1_s_1_e_1". Serves the per-symbol date-range reads (via its
+        # (SYMBOL, START) prefix -- so it replaces the old standalone sy_1_s_1 index) and
+        # symbols_in_range(date_range=...): leading on SYMBOL lets the $group use a DISTINCT_SCAN
+        # (hop between distinct symbols rather than scan every chunk), with START/END covered too,
+        # so it stays an index-only scan that never loads chunk payloads.
+        collection.create_index([(SYMBOL, pymongo.ASCENDING),
+                                 (START, pymongo.ASCENDING),
+                                 (END, pymongo.ASCENDING)], background=True)
 
         self._metadata.create_index([(SYMBOL, pymongo.ASCENDING)], background=True, unique=True)
 
@@ -280,7 +286,7 @@ class TickStore(object):
     def list_symbols(self, date_range=None):
         return self._collection.distinct(SYMBOL)
 
-    def symbols_in_range(self, date_range=None, columns=None, regex=None):
+    def symbols_in_range(self, date_range=None, columns=None, regex=None) -> list:
         """
         List the symbols that have at least one chunk overlapping ``date_range``,
         optionally restricted to symbols holding data for the given column(s).
@@ -305,27 +311,51 @@ class TickStore(object):
         -------
         list of `str`
             Sorted list of distinct symbol names.
+
+        Notes
+        -----
+        With a time bound this is served by an aggregation that groups on the
+        symbol server-side -- so only the distinct names cross the wire and the
+        planner can satisfy it from the ``(SYMBOL, START, END)`` index
+        (``sy_1_s_1_e_1``) as an index-only (covered) scan -- typically a
+        DISTINCT_SCAN that hops between symbols rather than reading every chunk,
+        never loading the large per-chunk index/data blobs. Make sure that index
+        exists (it is created by ``_ensure_index``; on a pre-existing library
+        create it once by hand) or the query falls back to a full collection
+        scan that fetches every chunk document.
         """
-        query = {}
-        date_range = to_pandas_closed_closed(date_range)
-        if date_range is not None:
-            # Only index on the chunk START/END, which is enough to test overlap:
-            # a chunk overlaps [start, end] iff chunk.START <= end and chunk.END >= start.
-            if date_range.end is not None:
-                query[START] = {'$lte': date_range.end}
-            if date_range.start is not None:
-                query[END] = {'$gte': date_range.start}
-
+        match = {}
         if regex is not None:
-            query[SYMBOL] = {'$regex': regex}
-
+            match[SYMBOL] = {'$regex': regex}
         if columns is not None:
+            # NB: $exists on a cs.<col> sub-path is not covered by any index, so passing
+            # columns forces document fetches. It is not the hot path; date_range/regex are.
             if isinstance(columns, str):
                 columns = [columns]
             for c in columns:
-                query['%s.%s' % (COLUMNS, c)] = {'$exists': True}
+                match['%s.%s' % (COLUMNS, c)] = {'$exists': True}
 
-        return sorted(self._collection.distinct(SYMBOL, query))
+        date_range = to_pandas_closed_closed(date_range)
+        has_time_bound = date_range is not None and (date_range.start is not None
+                                                     or date_range.end is not None)
+
+        if not has_time_bound:
+            # No time predicate -> a DISTINCT_SCAN on the (SYMBOL, START) index returns the
+            # names straight from the index without touching the (large) chunk payloads.
+            # distinct() takes filter=None when there is nothing to match on.
+            return sorted(self._collection.distinct(SYMBOL, match or None))
+
+        # A chunk overlaps [start, end] iff chunk.START <= end and chunk.END >= start.
+        if date_range.end is not None:
+            match[START] = {'$lte': date_range.end}
+        if date_range.start is not None:
+            match[END] = {'$gte': date_range.start}
+
+        # $group is the server-side "project to just the name": dedupe the (potentially huge)
+        # set of matching chunks down to distinct symbols on the server. Backed by the
+        # (SYMBOL, START, END) index (sy_1_s_1_e_1) this is a covered scan -- no fat chunk docs loaded.
+        pipeline = [{'$match': match}, {'$group': {'_id': '$' + SYMBOL}}]
+        return sorted(doc['_id'] for doc in self._collection.aggregate(pipeline, allowDiskUse=True))
 
     def _mongo_date_range_query(self, symbol, date_range):
         # Handle date_range

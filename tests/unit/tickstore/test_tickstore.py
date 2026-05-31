@@ -44,43 +44,55 @@ def test_mongo_date_range_query():
     assert query == {'s': {'$gte': dt(2014, 1, 1, 12, 0, tzinfo=mktz()), '$lte': dt(2014, 1, 3, 0, 0, tzinfo=mktz())}}
 
 
+def _agg_group():
+    return {'$group': {'_id': '$' + SYMBOL}}
+
+
 def test_symbols_in_range_query():
     self = create_autospec(TickStore)
     self._collection = create_autospec(Collection)
     self._collection.distinct.return_value = ['SYMB', 'SYMA']
 
-    # No range, no columns -> empty filter, results sorted.
-    assert TickStore.symbols_in_range(self) == ['SYMA', 'SYMB']
-    assert self._collection.distinct.call_args == call(SYMBOL, {})
-
-    # date_range builds an overlap filter (chunk.START <= end and chunk.END >= start).
     start = dt(2014, 1, 2, 0, 0, tzinfo=mktz())
     end = dt(2014, 1, 3, 0, 0, tzinfo=mktz())
-    TickStore.symbols_in_range(self, DateRange(start, end))
-    assert self._collection.distinct.call_args == call(SYMBOL, {START: {'$lte': end}, END: {'$gte': start}})
 
-    # A single column string is wrapped, and turns into an $exists check on the column path.
-    TickStore.symbols_in_range(self, columns='ASK')
-    assert self._collection.distinct.call_args == call(SYMBOL, {COLUMNS + '.ASK': {'$exists': True}})
+    # --- No time bound: served by a cheap DISTINCT_SCAN, never an aggregation. ---
 
-    # Multiple columns each get their own $exists; combines with the range.
-    TickStore.symbols_in_range(self, DateRange(start, end), columns=['ASK', 'BID'])
-    assert self._collection.distinct.call_args == call(SYMBOL, {
-        START: {'$lte': end}, END: {'$gte': start},
-        COLUMNS + '.ASK': {'$exists': True}, COLUMNS + '.BID': {'$exists': True}})
+    # Nothing to match -> distinct with filter=None.
+    assert TickStore.symbols_in_range(self) == ['SYMA', 'SYMB']
+    assert self._collection.distinct.call_args == call(SYMBOL, None)
 
-    # Only an open end bound -> only the START constraint.
-    TickStore.symbols_in_range(self, DateRange(None, end))
-    assert self._collection.distinct.call_args == call(SYMBOL, {START: {'$lte': end}})
-
-    # regex adds a $regex constraint on the symbol field, combining with everything else.
+    # regex only -> distinct filtered on the symbol field.
     TickStore.symbols_in_range(self, regex='^SYM')
     assert self._collection.distinct.call_args == call(SYMBOL, {SYMBOL: {'$regex': '^SYM'}})
 
-    TickStore.symbols_in_range(self, DateRange(start, end), columns='ASK', regex='^SYM')
-    assert self._collection.distinct.call_args == call(SYMBOL, {
-        START: {'$lte': end}, END: {'$gte': start},
-        SYMBOL: {'$regex': '^SYM'}, COLUMNS + '.ASK': {'$exists': True}})
+    # columns only (no time bound) -> distinct with an $exists filter on the column path.
+    TickStore.symbols_in_range(self, columns='ASK')
+    assert self._collection.distinct.call_args == call(SYMBOL, {COLUMNS + '.ASK': {'$exists': True}})
+
+    assert self._collection.aggregate.call_count == 0
+
+    # --- A time bound switches to a server-side $group aggregation (covered by the
+    #     (SYMBOL, START, END) index, sy_1_s_1_e_1). Overlap test is START <= end and END >= start. ---
+
+    self._collection.aggregate.return_value = iter([{'_id': 'SYMB'}, {'_id': 'SYMA'}])
+    assert TickStore.symbols_in_range(self, DateRange(start, end)) == ['SYMA', 'SYMB']
+    assert self._collection.aggregate.call_args == call(
+        [{'$match': {START: {'$lte': end}, END: {'$gte': start}}}, _agg_group()], allowDiskUse=True)
+
+    # Only an open end bound -> only the START constraint in the $match.
+    self._collection.aggregate.return_value = iter([])
+    TickStore.symbols_in_range(self, DateRange(None, end))
+    assert self._collection.aggregate.call_args == call(
+        [{'$match': {START: {'$lte': end}}}, _agg_group()], allowDiskUse=True)
+
+    # regex + columns + time all combine into the single $match stage.
+    self._collection.aggregate.return_value = iter([])
+    TickStore.symbols_in_range(self, DateRange(start, end), columns=['ASK', 'BID'], regex='^SYM')
+    assert self._collection.aggregate.call_args == call(
+        [{'$match': {SYMBOL: {'$regex': '^SYM'},
+                     COLUMNS + '.ASK': {'$exists': True}, COLUMNS + '.BID': {'$exists': True},
+                     START: {'$lte': end}, END: {'$gte': start}}}, _agg_group()], allowDiskUse=True)
 
 
 def test_mongo_date_range_query_asserts():
