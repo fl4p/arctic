@@ -44,6 +44,36 @@ def test_mongo_date_range_query():
     assert query == {'s': {'$gte': dt(2014, 1, 1, 12, 0, tzinfo=mktz()), '$lte': dt(2014, 1, 3, 0, 0, tzinfo=mktz())}}
 
 
+def test_symbols_in_range_query():
+    self = create_autospec(TickStore)
+    self._collection = create_autospec(Collection)
+    self._collection.distinct.return_value = ['SYMB', 'SYMA']
+
+    # No range, no columns -> empty filter, results sorted.
+    assert TickStore.symbols_in_range(self) == ['SYMA', 'SYMB']
+    assert self._collection.distinct.call_args == call(SYMBOL, {})
+
+    # date_range builds an overlap filter (chunk.START <= end and chunk.END >= start).
+    start = dt(2014, 1, 2, 0, 0, tzinfo=mktz())
+    end = dt(2014, 1, 3, 0, 0, tzinfo=mktz())
+    TickStore.symbols_in_range(self, DateRange(start, end))
+    assert self._collection.distinct.call_args == call(SYMBOL, {START: {'$lte': end}, END: {'$gte': start}})
+
+    # A single column string is wrapped, and turns into an $exists check on the column path.
+    TickStore.symbols_in_range(self, columns='ASK')
+    assert self._collection.distinct.call_args == call(SYMBOL, {COLUMNS + '.ASK': {'$exists': True}})
+
+    # Multiple columns each get their own $exists; combines with the range.
+    TickStore.symbols_in_range(self, DateRange(start, end), columns=['ASK', 'BID'])
+    assert self._collection.distinct.call_args == call(SYMBOL, {
+        START: {'$lte': end}, END: {'$gte': start},
+        COLUMNS + '.ASK': {'$exists': True}, COLUMNS + '.BID': {'$exists': True}})
+
+    # Only an open end bound -> only the START constraint.
+    TickStore.symbols_in_range(self, DateRange(None, end))
+    assert self._collection.distinct.call_args == call(SYMBOL, {START: {'$lte': end}})
+
+
 def test_mongo_date_range_query_asserts():
     self = create_autospec(TickStore)
     self._collection = create_autospec(Collection)

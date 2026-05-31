@@ -280,6 +280,47 @@ class TickStore(object):
     def list_symbols(self, date_range=None):
         return self._collection.distinct(SYMBOL)
 
+    def symbols_in_range(self, date_range=None, columns=None):
+        """
+        List the symbols that have at least one chunk overlapping ``date_range``,
+        optionally restricted to symbols holding data for the given column(s).
+
+        Parameters
+        ----------
+        date_range : `date.DateRange`
+            Only consider chunks that overlap this range. A chunk overlaps
+            ``[start, end]`` iff ``chunk.start <= end`` and ``chunk.end >= start``.
+            ``None`` (or open-ended bounds) means unbounded on that side, i.e.
+            the whole stored history.
+        columns : `str` or `list` of `str`
+            If given, only return symbols that have at least one in-range chunk
+            containing *every* one of these columns. Since columns are stored
+            per-chunk, a symbol qualifies as long as one of its overlapping
+            chunks carries all the requested columns.
+
+        Returns
+        -------
+        list of `str`
+            Sorted list of distinct symbol names.
+        """
+        query = {}
+        date_range = to_pandas_closed_closed(date_range)
+        if date_range is not None:
+            # Only index on the chunk START/END, which is enough to test overlap:
+            # a chunk overlaps [start, end] iff chunk.START <= end and chunk.END >= start.
+            if date_range.end is not None:
+                query[START] = {'$lte': date_range.end}
+            if date_range.start is not None:
+                query[END] = {'$gte': date_range.start}
+
+        if columns is not None:
+            if isinstance(columns, str):
+                columns = [columns]
+            for c in columns:
+                query['%s.%s' % (COLUMNS, c)] = {'$exists': True}
+
+        return sorted(self._collection.distinct(SYMBOL, query))
+
     def _mongo_date_range_query(self, symbol, date_range):
         # Handle date_range
         if not date_range:

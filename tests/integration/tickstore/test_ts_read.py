@@ -697,3 +697,34 @@ def test_objects_fail(tickstore_lib):
     with pytest.raises(Exception) as e:
         tickstore_lib.write('test', df)
     assert('Casting object column to string failed' in str(e.value))
+
+
+def test_symbols_in_range(tickstore_lib):
+    # SYMA spans 2013-01-01..2013-01-03 and has columns a, b, c.
+    # SYMB spans 2013-01-04..2013-01-05 and has columns b, c (no 'a').
+    tickstore_lib.write('SYMA', DUMMY_DATA[:3])
+    tickstore_lib.write('SYMB', DUMMY_DATA[3:])
+
+    # No range, no columns: every symbol.
+    assert tickstore_lib.symbols_in_range() == ['SYMA', 'SYMB']
+
+    # Range that only overlaps SYMA's chunk.
+    assert tickstore_lib.symbols_in_range(DateRange(20130101, 20130102)) == ['SYMA']
+    # Range that only overlaps SYMB's chunk.
+    assert tickstore_lib.symbols_in_range(DateRange(20130104, 20130106)) == ['SYMB']
+    # Range that overlaps both.
+    assert tickstore_lib.symbols_in_range(DateRange(20130103, 20130104)) == ['SYMA', 'SYMB']
+    # Range before any data.
+    assert tickstore_lib.symbols_in_range(DateRange(20120101, 20121231)) == []
+
+    # Column filter: only SYMA carries 'a'.
+    assert tickstore_lib.symbols_in_range(columns='a') == ['SYMA']
+    assert tickstore_lib.symbols_in_range(columns=['a']) == ['SYMA']
+    # Both carry b and c.
+    assert tickstore_lib.symbols_in_range(columns=['b', 'c']) == ['SYMA', 'SYMB']
+    # A column that doesn't exist anywhere.
+    assert tickstore_lib.symbols_in_range(columns='zzz') == []
+
+    # Range + column combined: 'a' only exists in SYMA, restricted to its range.
+    assert tickstore_lib.symbols_in_range(DateRange(20130101, 20130102), columns='a') == ['SYMA']
+    assert tickstore_lib.symbols_in_range(DateRange(20130104, 20130106), columns='a') == []
