@@ -708,32 +708,35 @@ def test_symbols_in_range(tickstore_lib):
     tickstore_lib.write('OTHER', DUMMY_DATA[3:])
 
     # No range, no columns: every symbol.
-    assert tickstore_lib.symbols_in_range() == ['OTHER', 'SYMA', 'SYMB']
+    assert tickstore_lib.list_symbols() == ['OTHER', 'SYMA', 'SYMB']
 
     # Range that only overlaps SYMA's chunk.
-    assert tickstore_lib.symbols_in_range(DateRange(20130101, 20130102)) == ['SYMA']
+    assert tickstore_lib.list_symbols(DateRange(20130101, 20130102)) == ['SYMA']
     # Range that overlaps the later chunk shared by SYMB and OTHER.
-    assert tickstore_lib.symbols_in_range(DateRange(20130104, 20130106)) == ['OTHER', 'SYMB']
+    assert tickstore_lib.list_symbols(DateRange(20130104, 20130106)) == ['OTHER', 'SYMB']
     # Range that overlaps everything.
-    assert tickstore_lib.symbols_in_range(DateRange(20130103, 20130104)) == ['OTHER', 'SYMA', 'SYMB']
+    assert tickstore_lib.list_symbols(DateRange(20130103, 20130104)) == ['OTHER', 'SYMA', 'SYMB']
     # Range before any data.
-    assert tickstore_lib.symbols_in_range(DateRange(20120101, 20121231)) == []
+    assert tickstore_lib.list_symbols(DateRange(20120101, 20121231)) == []
 
     # Column filter: only SYMA carries 'a'.
-    assert tickstore_lib.symbols_in_range(columns='a') == ['SYMA']
-    assert tickstore_lib.symbols_in_range(columns=['a']) == ['SYMA']
+    assert tickstore_lib.list_symbols(columns='a') == ['SYMA']
+    assert tickstore_lib.list_symbols(columns=['a']) == ['SYMA']
     # SYMA, SYMB and OTHER all carry b and c.
-    assert tickstore_lib.symbols_in_range(columns=['b', 'c']) == ['OTHER', 'SYMA', 'SYMB']
+    assert tickstore_lib.list_symbols(columns=['b', 'c']) == ['OTHER', 'SYMA', 'SYMB']
     # A column that doesn't exist anywhere.
-    assert tickstore_lib.symbols_in_range(columns='zzz') == []
+    assert tickstore_lib.list_symbols(columns='zzz') == []
 
     # Range + column combined: 'a' only exists in SYMA, restricted to its range.
-    assert tickstore_lib.symbols_in_range(DateRange(20130101, 20130102), columns='a') == ['SYMA']
-    assert tickstore_lib.symbols_in_range(DateRange(20130104, 20130106), columns='a') == []
+    assert tickstore_lib.list_symbols(DateRange(20130101, 20130102), columns='a') == ['SYMA']
+    assert tickstore_lib.list_symbols(DateRange(20130104, 20130106), columns='a') == []
 
     # regex filter on the symbol name.
-    assert tickstore_lib.symbols_in_range(regex='^SYM') == ['SYMA', 'SYMB']
-    assert tickstore_lib.symbols_in_range(regex='B$') == ['SYMB']
+    assert tickstore_lib.list_symbols(regex='^SYM') == ['SYMA', 'SYMB']
+    assert tickstore_lib.list_symbols(regex='B$') == ['SYMB']
     # regex combined with range and columns.
-    assert tickstore_lib.symbols_in_range(DateRange(20130104, 20130106), regex='^SYM') == ['SYMB']
-    assert tickstore_lib.symbols_in_range(columns=['b', 'c'], regex='^OTH') == ['OTHER']
+    assert tickstore_lib.list_symbols(DateRange(20130104, 20130106), regex='^SYM') == ['SYMB']
+    assert tickstore_lib.list_symbols(columns=['b', 'c'], regex='^OTH') == ['OTHER']
+
+    # symbols_in_range is a backwards-compatible alias of list_symbols.
+    assert tickstore_lib.symbols_in_range(regex='^SYM') == ['SYMA', 'SYMB']

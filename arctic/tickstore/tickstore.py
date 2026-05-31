@@ -298,13 +298,15 @@ class TickStore(object):
             self._metadata.delete_one({SYMBOL: symbol})
         return self._collection.delete_many(query)
 
-    def list_symbols(self, date_range=None):
-        return self._collection.distinct(SYMBOL)
-
-    def symbols_in_range(self, date_range=None, columns=None, regex=None) -> list:
+    def list_symbols(self, date_range=None, columns=None, regex=None) -> list:
         """
-        List the symbols that have at least one chunk overlapping ``date_range``,
-        optionally restricted to symbols holding data for the given column(s).
+        List the symbols in the store, optionally restricted to those that have data
+        overlapping ``date_range`` and/or hold the given column(s) and/or match ``regex``.
+
+        With no arguments this returns *every* symbol via a single covered DISTINCT_SCAN
+        over the ``(SYMBOL, ...)`` index; its cost is proportional to the number of symbols
+        and can't be reduced further. Passing a filter returns only the relevant subset,
+        which is much cheaper than listing them all.
 
         Parameters
         ----------
@@ -397,6 +399,9 @@ class TickStore(object):
 
         pipeline = [{'$match': overlap_match(base)}, {'$group': {'_id': '$' + SYMBOL}}]
         return sorted(doc['_id'] for doc in coll.aggregate(pipeline, allowDiskUse=True))
+
+    # Backwards-compatible alias for the previous name of this method.
+    symbols_in_range = list_symbols
 
     def _mongo_date_range_query(self, symbol, date_range):
         # Handle date_range

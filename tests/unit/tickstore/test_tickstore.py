@@ -62,13 +62,13 @@ def test_symbols_in_range_query():
 
     # --- No time bound, no regex -> a plain DISTINCT_SCAN via distinct(SYMBOL). ---
     self._collection.distinct.return_value = ['SYMB', 'SYMA']
-    assert TickStore.symbols_in_range(self) == ['SYMA', 'SYMB']
+    assert TickStore.list_symbols(self) == ['SYMA', 'SYMB']
     assert self._collection.distinct.call_args == call(SYMBOL)
     assert self._collection.aggregate.call_count == 0
 
     # --- regex, no time bound -> enumerate via $group then $match the regex (index-only). ---
     self._collection.aggregate.side_effect = _agg_ids('SYMB', 'SYMA')
-    assert TickStore.symbols_in_range(self, regex='^SYM') == ['SYMA', 'SYMB']
+    assert TickStore.list_symbols(self, regex='^SYM') == ['SYMA', 'SYMB']
     assert self._collection.aggregate.call_args == call(
         [_grp(), {'$match': {'_id': {'$regex': '^SYM'}}}], allowDiskUse=True)
 
@@ -77,7 +77,7 @@ def test_symbols_in_range_query():
         iter([{'_id': 'XXBTZUSD'}, {'_id': 'XBTUSD'}]),   # candidate enumeration
         iter([{'_id': 'XXBTZUSD'}]),                       # overlap result
     ]
-    assert TickStore.symbols_in_range(self, DateRange(start, end), regex='^X') == ['XXBTZUSD']
+    assert TickStore.list_symbols(self, DateRange(start, end), regex='^X') == ['XXBTZUSD']
     enum_call, overlap_call = self._collection.aggregate.call_args_list[-2:]
     assert enum_call == call([_grp(), {'$match': {'_id': {'$regex': '^X'}}}], allowDiskUse=True)
     assert overlap_call == call(
@@ -88,20 +88,23 @@ def test_symbols_in_range_query():
 
     # empty candidate set -> short-circuit to [], no overlap aggregation issued.
     self._collection.aggregate.side_effect = [iter([])]
-    assert TickStore.symbols_in_range(self, DateRange(start, end), regex='^NONE') == []
+    assert TickStore.list_symbols(self, DateRange(start, end), regex='^NONE') == []
 
     # --- no regex + time bound -> overlap aggregation over all symbols (no $in). ---
     self._collection.aggregate.side_effect = [iter([{'_id': 'SYMB'}, {'_id': 'SYMA'}])]
-    assert TickStore.symbols_in_range(self, DateRange(start, end)) == ['SYMA', 'SYMB']
+    assert TickStore.list_symbols(self, DateRange(start, end)) == ['SYMA', 'SYMB']
     assert self._collection.aggregate.call_args == call(
         [{'$match': {START: {'$lte': end}, END: {'$gte': start}}}, _grp()], allowDiskUse=True)
 
     # --- columns + time bound -> strict single-chunk semantics, one combined $match + $group. ---
     self._collection.aggregate.side_effect = [iter([{'_id': 'SYMB'}, {'_id': 'SYMA'}])]
-    assert TickStore.symbols_in_range(self, DateRange(start, end), columns=['ASK', 'BID']) == ['SYMA', 'SYMB']
+    assert TickStore.list_symbols(self, DateRange(start, end), columns=['ASK', 'BID']) == ['SYMA', 'SYMB']
     assert self._collection.aggregate.call_args == call(
         [{'$match': {COLUMNS + '.ASK': {'$exists': True}, COLUMNS + '.BID': {'$exists': True},
                      START: {'$lte': end}, END: {'$gte': start}}}, _grp()], allowDiskUse=True)
+
+    # symbols_in_range is kept as a backwards-compatible alias of list_symbols.
+    assert TickStore.symbols_in_range is TickStore.list_symbols
 
 
 def test_mongo_date_range_query_asserts():
