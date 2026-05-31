@@ -157,6 +157,14 @@ register_codec('LnQ20VQLgz', LnQ20VQLgz)  # for l2 data, general purpose [1e-15,
 register_codec('LnQ15br9', LnQ16('br_9', 15))  # for qty, 115ppm, abs(x) >= 0.73e-11
 register_codec('LnQ185VQLgz', LnQ16_VQL('gz', 1.85, 0, 0))  # for px 16ppm, down to 1e-45, then overflow
 
+# brotli q10 + smallest window (lgwin=10) on the VQL pipeline: ~24-30% smaller than LnQ20VQLgz at
+# ~232ppm (loss=30 uses the full 250ppm budget). Decode ~1.9x the column-data cost of gz (the slower
+# brotli decompress); index/rowmask are unaffected (lz4). Best size/decode point found on real L2
+# data (beats lzma on decode, zstd on size). See test/coding/find_coders.py in the jnb repo.
+_LnQ30brW10q10 = LnQ16_VQL('br_w10q10', loq_loss=30, log_prescale=20, loq_preadd=1e-12)
+_LnQ30brW10q10.rtol_max = 250e-6  # loss=30 inherent error ~232ppm; default 200ppm would fail verify
+register_codec('LnQ30brW10q10', _LnQ30brW10q10)
+
 
 def index_to_ns(series, dtype=np.int64):
     try:
