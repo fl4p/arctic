@@ -137,7 +137,9 @@ def test_tickstore_to_bucket_varint():
             {'index': dt(2014, 1, 1, 0, 2, tzinfo=mktz(tz)), 'A': 125, 'B': 27.2},
             {'index': dt(2014, 1, 1, 0, 4, tzinfo=mktz(tz)), 'A': 126, 'B': 24.2}
             ]
-    bucket, final_image = TickStore._to_bucket(data, symbol, None, index_precision='s', varint_coding=True)
+    # pins the lz4+varint index layout this test inspects byte-for-byte (the default is now 'pco')
+    bucket, final_image = TickStore._to_bucket(data, symbol, None, index_precision='s', varint_coding=True,
+                                               index_compressor='lz4')
     assert bucket[VERSION] == 4
     assert bucket[INDEX_PRECISION] == 's'
     assert bucket[COUNT] == 3
@@ -177,7 +179,8 @@ def test_tickstore_to_bucket_with_image():
         assert dt.fromtimestamp(int(TickStore._to_ms(t) / 1000), tz=mktz(tz)) == t
         assert dt.fromtimestamp(int(TickStore._to_ms(t) / 1000), tz=mktz(tz)).replace(tzinfo=mktz(tz)) == t
         # assert dt.fromtimestamp(int(TickStore._to_ms(t) / 1000)).replace(tzinfo=mktz(tz)) == t
-        bucket, final_image = TickStore._to_bucket(data, symbol, initial_image)
+        # pins the lz4 raw-uint64 index layout this test inspects byte-for-byte (the default is now 'pco')
+        bucket, final_image = TickStore._to_bucket(data, symbol, initial_image, index_compressor='lz4')
         assert bucket[COUNT] == 2
         assert bucket[END] == dt(2014, 1, 1, 0, 2, tzinfo=mktz(tz))
         assert set(bucket[COLUMNS]) == set(('A', 'B', 'D'))
