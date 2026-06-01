@@ -103,8 +103,11 @@ def test_symbols_in_range_query():
         [{'$match': {COLUMNS + '.ASK': {'$exists': True}, COLUMNS + '.BID': {'$exists': True},
                      START: {'$lte': end}, END: {'$gte': start}}}, _grp()], allowDiskUse=True)
 
-    # symbols_in_range is kept as a backwards-compatible alias of list_symbols.
-    assert TickStore.symbols_in_range is TickStore.list_symbols
+    # symbols_in_range is kept as a deprecated alias that warns and delegates to list_symbols.
+    self.list_symbols.return_value = ['SYMA', 'SYMB']
+    with pytest.warns(DeprecationWarning):
+        assert TickStore.symbols_in_range(self, regex='^SYM') == ['SYMA', 'SYMB']
+    assert self.list_symbols.call_args == call(regex='^SYM')
 
 
 def test_mongo_date_range_query_asserts():

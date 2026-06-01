@@ -4,8 +4,11 @@ import copy
 import datetime
 import logging
 import pickle
+import sys
+import time
 from collections import defaultdict
 from datetime import datetime as dt, timedelta
+from typing import List, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -220,6 +223,25 @@ def ns2dt(ns, **kwargs):
     return pd.to_datetime(ns, unit='ns', **kwargs)
 
 
+def _progressbar(it, count=None, prefix="", size=60, out=sys.stdout):  # Python3.6+
+    count = count or len(it)
+    start = time.time()  # time estimate start
+
+    def show(j):
+        x = int(size * j / count)
+        # time estimate calculation and string
+        remaining = ((time.time() - start) / j) * (count - j)
+        mins, sec = divmod(remaining, 60)  # limited to minutes
+        time_str = f"{int(mins):02}:{sec:03.1f}"
+        print(f" [{u'█' * x}{('.' * (size - x))}] {prefix} {j}/{count} Est wait {time_str}", end='\r', file=out,
+              flush=True)
+
+    for i, item in enumerate(it):
+        yield item
+        show(i + 1)
+    print("\n", flush=True, file=out)
+
+
 class TickStore(object):
 
     @classmethod
@@ -411,8 +433,11 @@ class TickStore(object):
         pipeline = [{'$match': overlap_match(base)}, {'$group': {'_id': '$' + SYMBOL}}]
         return sorted(doc['_id'] for doc in coll.aggregate(pipeline, allowDiskUse=True))
 
-    # Backwards-compatible alias for the previous name of this method.
-    symbols_in_range = list_symbols
+    def symbols_in_range(self, *args, **kwargs):
+        """Deprecated alias for :meth:`list_symbols` (same signature)."""
+        warnings.warn("TickStore.symbols_in_range is deprecated; use list_symbols",
+                      DeprecationWarning, stacklevel=2)
+        return self.list_symbols(*args, **kwargs)
 
     def _mongo_date_range_query(self, symbol, date_range):
         # Handle date_range
@@ -503,28 +528,6 @@ class TickStore(object):
 
     def _fetch_and_decode(self, symbol, date_range, columns, allow_secondary, include_images, show_progress,
                           _target_tick_count):
-        import sys
-        import time
-
-        def progressbar(it, count=None, prefix="", size=60, out=sys.stdout):  # Python3.6+
-            count = count or len(it)
-            start = time.time()  # time estimate start
-
-            def show(j):
-                x = int(size * j / count)
-                # time estimate calculation and string
-                remaining = ((time.time() - start) / j) * (count - j)
-                mins, sec = divmod(remaining, 60)  # limited to minutes
-                time_str = f"{int(mins):02}:{sec:03.1f}"
-                print(f" [{u'█' * x}{('.' * (size - x))}] {prefix} {j}/{count} Est wait {time_str}", end='\r', file=out,
-                      flush=True)
-
-            # show(0.1)  # avoid div/0
-            for i, item in enumerate(it):
-                yield item
-                show(i + 1)
-            print("\n", flush=True, file=out)
-
         rtn = {}
         column_set = set()
 
@@ -550,7 +553,7 @@ class TickStore(object):
         num = mongo_count(data_coll, filter=query)
         if show_progress:
             if num > 20:
-                cursor = progressbar(cursor, prefix=symbol, count=num)
+                cursor = _progressbar(cursor, prefix=symbol, count=num)
 
         buckets = []
         for doc in cursor:
@@ -576,26 +579,19 @@ class TickStore(object):
                 assert not data.get(COLUMNS)
                 continue
             if data[INDEX][0] < t:
-                print(self._arctic_lib, symbol, '\noverlapping blocks=[\n')
-                print(',\n'.join(([repr(ms_to_iso((b[INDEX][0], b[INDEX][-1]))) for b in buckets])) + ']')
-
+                # Chunks are validated non-overlapping on write and fetched START-sorted, so this is
+                # defence-in-depth. Log the block layout for forensics (through the logger, not stdout,
+                # and only when this actually fires) and fail clearly rather than returning shuffled
+                # ticks. Equal-range blocks are usually just duplicates -- group them so the log shows
+                # whether that is the case, without the old per-block pickle asserts (which raised
+                # AssertionError before this ValueError, and compiled out entirely under `python -O`).
                 grouped = defaultdict(list)
                 for b in buckets:
-                    grouped[(b[INDEX][0], b[INDEX][-1])].append(b)
-
-                b2 = list(data_coll.find(query, projection={"_id": 1, "s": 1}).sort([(START, pymongo.ASCENDING)], ))
-                print(b2)
-
-                print('grouped:')
-                for (s, e), g in grouped.items():
-                    print(s, e, len(g))  # TODO _id
-                for (s, e), g in grouped.items():
-                    for b in g[1:]:
-                        assert (b[INDEX] == g[0][INDEX]).all()
-                        assert b.keys() == g[0].keys()
-                        assert pickle.dumps(b) == pickle.dumps(g[0])
-                        # if all these asserts pass, we known that the overlapping blocks are just duplicates
-
+                    if len(b[INDEX]):
+                        grouped[(b[INDEX][0], b[INDEX][-1])].append(b)
+                logger.error("%s %s: overlapping/out-of-order blocks. Ranges (start, end, count):\n%s",
+                             self._arctic_lib, symbol,
+                             '\n'.join('%s  x%d' % (ms_to_iso((s, e)), len(g)) for (s, e), g in grouped.items()))
                 raise ValueError('overlap block: prev ends at %s, curr start at %s' % ms_to_iso((t, data[INDEX][0])))
 
             assert data[INDEX][0] <= data[INDEX][-1]
@@ -620,8 +616,8 @@ class TickStore(object):
     def read(self, symbol, date_range=None, columns=None, include_images=False, allow_secondary=None,
              _target_tick_count=0, show_progress=False):
         """
-        Read data for the named symbol.  Returns a VersionedItem object with
-        a data and metdata element (as passed into write).
+        Read data for the named symbol. Returns a ``pandas.DataFrame`` of the stored ticks
+        (see the Returns section); use ``read_metadata`` for the per-symbol metadata.
 
         Parameters
         ----------
