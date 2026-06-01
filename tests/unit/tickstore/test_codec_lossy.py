@@ -10,6 +10,7 @@ Covers the behaviours hardened during the codec review/search:
   * _encode always produces an lz4 fallback for the no-codec path, even verify=off (#1)
   * full write->read bucket serialization round-trips with the new codec
 """
+import datetime
 import types
 
 import numpy as np
@@ -333,6 +334,111 @@ def test_index_pco_via_ticks_path():
                                    include_symbol=False, include_images=False, columns=None)
     got = pd.to_datetime(np.asarray(rtn['i']) * 1_000_000, utc=True)
     assert np.array_equal(got.view('int64'), idx.view('int64'))
+
+
+def _apply_mongo_projection(doc, projection):
+    """Mimic a MongoDB inclusion projection so a field omitted from the projection is genuinely
+    absent from the doc handed to _decode_bucket -- which is exactly how the read path loses the
+    INDEX_COMPRESSION marker when it isn't projected."""
+    out = {}
+    nested = {}
+    for key in projection:
+        if '.' in key:
+            top, sub = key.split('.', 1)
+            nested.setdefault(top, set()).add(sub)
+        elif key in doc:
+            out[key] = doc[key]
+    for top, subs in nested.items():
+        if top in doc:
+            out[top] = {k: v for k, v in doc[top].items() if k in subs}
+    return out
+
+
+@pco_required
+@pytest.mark.parametrize("columns", [None, ['volAt40', 'vwapBid']])
+def test_pco_bucket_survives_read_projection(columns):
+    # Regression guard for the dropped INDEX_COMPRESSION projection field. pco is the default index
+    # writer, so a real read() must decode a pco bucket *after* it passes through the exact field set
+    # read() fetches from Mongo (TickStore._read_projection). If 'd' is missing from the projection,
+    # the projected doc loses it, _decode_bucket falls back to lz4 and raises LZ4BlockError on the
+    # pco-encoded index -- the production failure, reproduced here with no live Mongo.
+    bucket, df, idx, _, _ = _index_roundtrip('pco')
+    assert bucket['d'] == 'pco'
+    projected = _apply_mongo_projection(bucket, TickStore._read_projection(columns))
+    assert projected.get('d') == 'pco', "read projection dropped INDEX_COMPRESSION"
+    fake_self = types.SimpleNamespace(_index_precision='ms')
+    col_set = set(df.columns) if columns is None else set(columns)
+    rtn = TickStore._decode_bucket(fake_self, projected, col_set, {},
+                                   include_symbol=False, include_images=False, columns=columns)
+    got = pd.to_datetime(np.asarray(rtn['i']) * 1_000_000, utc=True)
+    assert np.array_equal(got.view('int64'), idx.view('int64'))
+
+
+@pco_required
+@pytest.mark.parametrize("index_compressor", ['pco', 'lz4'])
+def test_ms_index_to_ns_no_float_precision_loss(index_compressor):
+    # read() turns the decoded uint64 *ms* index into ns. Doing `uint64_array * np.int64(1_000_000)`
+    # promotes to float64 (no common uint64/int64 integer dtype in numpy), and at ns magnitudes
+    # float64's ULP is hundreds of ns -- so sub-second timestamps come back rounded
+    # (.001ms -> .000999936). Whole-second values stay exact, which is why only ms-resolution reads
+    # broke. This guards the integer (view-as-int64) conversion read() now uses.
+    #
+    # pick ms timestamps whose ns value is an odd multiple of 1e6 (2-adic valuation below float64's
+    # ULP exponent at this magnitude) so the float64 path is guaranteed to corrupt them:
+    idx = pd.to_datetime(['2017-01-01T01:01:00.001Z', '2017-01-01T01:02:00.001Z',
+                          '2017-01-01T01:03:00.007Z'])
+    df = pd.DataFrame({'a': [1., 2., 3.]}, index=idx).astype(np.float32)
+    bucket, _ = TickStore._to_bucket_pandas(df, 'SYM', None, 1_000_000, index_compressor=index_compressor)
+    fake_self = types.SimpleNamespace(_index_precision='ms')
+    rtn = TickStore._decode_bucket(fake_self, bucket, set(df.columns), {},
+                                   include_symbol=False, include_images=False, columns=None)
+
+    ns = TickStore._index_ms_to_ns([rtn['i']])
+    assert ns.dtype == np.int64                                   # stayed integer, no float promotion
+    got = pd.DatetimeIndex(ns, tz=datetime.timezone.utc)
+    assert (got == idx).all(), (list(got.astype(str)), list(idx.astype(str)))
+
+    if rtn['i'].dtype == np.uint64:
+        # the uint64 layout (pco, and the v3 raw-uint64 lz4 layout) is what triggered the bug: the
+        # old `uint64_array * np.int64(...)` promotes to float64 and loses the .001ms. (The v4 varint
+        # lz4 layout decodes to int64 and was never affected -- which is why pco-as-default exposed it.)
+        naive = np.concatenate([rtn['i']]) * np.int64(1_000_000)
+        assert naive.dtype == np.float64
+        assert not (pd.DatetimeIndex(naive.astype('int64'), tz=datetime.timezone.utc) == idx).all()
+
+
+@pco_required
+@pytest.mark.parametrize("index_compressor", ['pco', 'lz4'])
+@pytest.mark.parametrize("label,prec_ns", [('ms', 1_000_000), ('s', 1_000_000_000)])
+def test_pre_epoch_index_roundtrip(index_compressor, label, prec_ns):
+    # Pre-1970 timestamps are negative int64 ns; the index layout stores them as int64 reinterpreted
+    # to uint64. The decode-time sanity asserts did `uint64_scalar * 1_000_000`, which OVERFLOWS
+    # (wraps mod 2^64) for those wrapped values and raised AssertionError. They must view as int64
+    # first. Guard the full pre-epoch round-trip (index + column data).
+    idx = pd.to_datetime(['1854-01-01T00:00:00Z', '1854-01-01T00:00:02Z', '1854-01-01T00:00:04Z'])
+    assert pd.Timestamp(idx[0]).value < 0                            # genuinely pre-epoch
+    df = pd.DataFrame({'a': [1., 2., 3.]}, index=idx).astype(np.float64)
+    bucket, _ = TickStore._to_bucket_pandas(df, 'SYM', None, prec_ns, index_compressor=index_compressor)
+    fake_self = types.SimpleNamespace(_index_precision=label)
+    rtn = TickStore._decode_bucket(fake_self, bucket, set(df.columns), {},
+                                   include_symbol=False, include_images=False, columns=None)
+    got = pd.DatetimeIndex(TickStore._index_ms_to_ns([rtn['i']]), tz=datetime.timezone.utc)
+    assert (got == idx.ceil('1%s' % label)).all(), (list(got.astype(str)), list(idx.astype(str)))
+    assert np.allclose(rtn['a'], df['a'].values)
+
+
+def test_arrays_to_dataframe_pandas_version_compat():
+    # read() builds its result DataFrame via pandas' internal arrays_to_mgr, whose signature changed
+    # across pandas majors (0.x positional / 1.x-2.x typ='block' / >=3.0 typ removed). This guards
+    # that the version dispatch calls it correctly on the *installed* pandas -- it would have caught
+    # the pandas-3.0 break (`arrays_to_mgr() got an unexpected keyword argument 'typ'`).
+    index = pd.DatetimeIndex(np.array([1, 2, 3], dtype='int64') * 1_000_000_000, tz='UTC')
+    arrays = [np.array([1., 2., 3.]), np.array([4., 5., 6.])]
+    df = TickStore._arrays_to_dataframe(arrays, ['a', 'b'], index)
+    assert isinstance(df, pd.DataFrame)
+    assert list(df.columns) == ['a', 'b']
+    assert (df.index == index).all()
+    assert df['a'].tolist() == [1., 2., 3.] and df['b'].tolist() == [4., 5., 6.]
 
 
 # --- full write->read bucket serialization (no mongo) ----------------------------

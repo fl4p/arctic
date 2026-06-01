@@ -1,5 +1,13 @@
 ## Changelog
 
+### Unreleased
+ * Feature: register `LnQ185pco` — a wide-range pco column codec (loss=1.85, prescale=0, ~18ppm, full positive float32 range ~1e-45..3.4e38); the pco twin of `LnQ185VQLgz`, for price columns whose dynamic range exceeds `LnQ30pco`'s (~3.2e32, prescale=20).
+ * Bugfix: TickStore read dropped the `INDEX_COMPRESSION` field from the Mongo projection, so `pco`-compressed indexes (now the default) silently fell back to lz4 and raised `LZ4BlockError` on every real read.
+ * Bugfix: TickStore read converted the decoded uint64 millisecond index to ns via `uint64 * int64`, which numpy promotes to float64 — corrupting sub-second timestamps (`.001ms` read back as `.000999936`). Whole-second values were unaffected, so only ms-resolution reads broke. Now done in int64.
+ * Bugfix: TickStore `_decode_bucket` sanity asserts multiplied the uint64 index by 1e6, overflowing for pre-epoch (negative, uint64-reinterpreted) timestamps and raising a spurious `AssertionError`. Now viewed as int64 first.
+ * Bugfix: `UnorderedDataException` is now also a `ValueError`, so `except ValueError` (and existing callers/tests) catch non-monotonic-input errors again; the DataFrame write path's non-monotonic guard now raises it too.
+ * Compatibility: support pandas >= 3.0 in TickStore read — pandas 3.0 removed the `typ` argument from `arrays_to_mgr`, which raised `arrays_to_mgr() got an unexpected keyword argument 'typ'`.
+
 ### 1.82.1 (2023-10-09)
  * Release: #1014 Prepare release 1.82.1
  * Bugfix: #1013 Fix serialized tz name for index timezones of dateutil.timezone.tzutc()

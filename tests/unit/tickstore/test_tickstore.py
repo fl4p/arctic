@@ -232,6 +232,26 @@ def test_tickstore_to_bucket_always_forwards_image():
         TickStore._to_bucket(data, symbol, initial_image)
 
 
+def test_unordered_data_exception_is_valueerror():
+    # UnorderedDataException must also be a ValueError: callers/tests have long caught ValueError for
+    # non-monotonic input, and both the ticks path and the DataFrame path must honour that contract.
+    assert issubclass(UnorderedDataException, ValueError)
+
+    # ticks path (_to_bucket / _bucket_head): descending timestamps
+    data = [{'index': dt(2018, 1, 1, tzinfo=mktz('UTC')), 'a': 1.},
+            {'index': dt(2017, 12, 31, tzinfo=mktz('UTC')), 'a': 2.}]
+    with pytest.raises(ValueError):
+        TickStore._to_bucket(data, 'SYM', None)
+
+    # DataFrame path (_to_bucket_pandas): first tick after last -> UnorderedDataException(ValueError)
+    base = pd.Timestamp('2018-01-01', tz='UTC')
+    idx = pd.DatetimeIndex([base, base + pd.Timedelta('1ms'),
+                            base - pd.Timedelta('2s'), base - pd.Timedelta('3s')])
+    df = pd.DataFrame({'a': np.arange(4.)}, index=idx)
+    with pytest.raises(ValueError):
+        TickStore._to_bucket_pandas(df, 'SYM', None, 1_000_000)
+
+
 def get_coldata(coldata):
     """ return values and rowmask """
     dtype = np.dtype(coldata[DTYPE])

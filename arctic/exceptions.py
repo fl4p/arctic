@@ -49,7 +49,10 @@ class ConcurrentModificationException(DataIntegrityException):
     pass
 
 
-class UnorderedDataException(DataIntegrityException):
+class UnorderedDataException(DataIntegrityException, ValueError):
+    # Also a ValueError: unordered / non-monotonic input data is a value error, and callers (and
+    # tests) have long caught ValueError for this. Multiple inheritance keeps the specific type and
+    # the ArcticException/DataIntegrityException lineage while making `except ValueError` catch it.
     pass
 
 

@@ -180,6 +180,12 @@ register_codec('LnQ30pco', _LnQ30pco)
 # no rtol_max override. Requires the optional `pcodec` package (lazily imported on first use).
 register_codec('LnQ15pcoS', LnQ16_pco(loq_loss=15, log_prescale=37, loq_preadd=1e-4, signed=True))
 
+# Wide-range pco codec for px: the pco twin of LnQ185VQLgz (loss=1.85, prescale=0, preadd=0 -> ln_q16
+# takes log(x) directly, so no x*2**prescale step to overflow). Covers the full positive float32 range
+# (~1e-45 .. 3.4e38) at ~18ppm, unlike LnQ30pco (prescale=20) which overflows above ~3.2e32. Use this
+# for price columns that need wide dynamic range; LnQ30pco stays the choice for bounded L2/general data.
+register_codec('LnQ185pco', LnQ16_pco(loq_loss=1.85, log_prescale=0, loq_preadd=0))
+
 
 def index_to_ns(series, dtype=np.int64):
     try:
@@ -523,25 +529,9 @@ class TickStore(object):
         query = self._symbol_query(symbol)
         query.update(self._mongo_date_range_query(symbol, date_range))
 
+        projection = TickStore._read_projection(columns)
         if columns:
-            projection = dict([(SYMBOL, 1),
-                               (INDEX, 1),
-                               (INDEX_PRECISION, 1),
-                               (START, 1),
-                               (END, 1),
-                               (VERSION, 1),
-                               (IMAGE_DOC, 1)] +
-                              [(COLUMNS + '.%s' % c, 1) for c in columns])
             column_set.update([c for c in columns if c != 'SYMBOL'])
-        else:
-            projection = dict([(SYMBOL, 1),
-                               (INDEX, 1),
-                               (INDEX_PRECISION, 1),
-                               (START, 1),
-                               (END, 1),
-                               (VERSION, 1),
-                               (COLUMNS, 1),
-                               (IMAGE_DOC, 1)])
 
         column_dtypes = {}
 
@@ -667,7 +657,7 @@ class TickStore(object):
         rtn = self._pad_and_fix_dtypes(rtn, column_dtypes)
 
         # index = pd.to_datetime(np.concatenate(rtn[INDEX]), utc=True, unit='ms') # this is slow
-        idx_ns = np.concatenate(rtn[INDEX]) * np.int64(1000_000)
+        idx_ns = TickStore._index_ms_to_ns(rtn[INDEX])
         index = pd.DatetimeIndex(idx_ns, tz=datetime.timezone.utc)  # this has ~zero cost!
         # and we already validated our index during write
 
@@ -688,15 +678,7 @@ class TickStore(object):
 
         t = (dt.now() - perf_start).total_seconds()
         logger.info("Got data in %s secs, creating DataFrame..." % t)
-        if pd.__version__.startswith("0.") or pd.__version__.startswith("1."):
-            if pd.__version__.startswith("1."):
-                mgr = _arrays_to_mgr(arrays, columns, index, dtype=None, typ='block')
-            else:
-                mgr = _arrays_to_mgr(arrays, columns, index, columns, dtype=None)
-        else:
-            mgr = _arrays_to_mgr(arrays, columns, index, dtype=None, typ="block")
-
-        rtn = pd.DataFrame(mgr)
+        rtn = TickStore._arrays_to_dataframe(arrays, columns, index)
         # Present data in the user's default TimeZone
         rtn.index = rtn.index.tz_convert(mktz())
 
@@ -853,6 +835,55 @@ class TickStore(object):
                 document[field] = np.insert(document[field], 0, document[field].dtype.type(val))
         return document
 
+    @staticmethod
+    def _arrays_to_dataframe(arrays, columns, index):
+        # Build the result DataFrame via pandas' internal arrays_to_mgr (fast, avoids per-column
+        # copies). Its signature changed across pandas majors and must be dispatched by version:
+        #   0.x      -> columns passed positionally twice
+        #   1.x/2.x  -> typ='block'
+        #   >= 3.0   -> the `typ` argument was removed (BlockManager is the only manager); passing it
+        #               raises "arrays_to_mgr() got an unexpected keyword argument 'typ'".
+        if pd.__version__.startswith("0."):
+            mgr = _arrays_to_mgr(arrays, columns, index, columns, dtype=None)
+        elif int(pd.__version__.split(".")[0]) >= 3:
+            mgr = _arrays_to_mgr(arrays, columns, index, dtype=None)
+        else:
+            mgr = _arrays_to_mgr(arrays, columns, index, dtype=None, typ="block")
+        return pd.DataFrame(mgr)
+
+    @staticmethod
+    def _index_ms_to_ns(index_arrays):
+        # rtn[INDEX] holds uint64 millisecond arrays (pco_decode / cumsum). numpy has no common
+        # integer dtype for uint64 * int64, so `uint64_array * np.int64(1_000_000)` silently
+        # promotes to float64 -- whose ULP at ns magnitudes (~1.5e18) is hundreds of ns. That
+        # rounds sub-second timestamps on the way out (e.g. ...460001 ms -> ...460000999936 ns,
+        # i.e. .001ms read back as .000999936); whole-second values stay exact, which is why only
+        # ms-resolution reads were corrupted. view (not astype) as int64: zero-cost, bit-exact, and
+        # it preserves the pre-epoch wraparound the uint64 layout encodes, keeping the product integer.
+        return np.concatenate(index_arrays).view(np.int64) * np.int64(1000_000)
+
+    @staticmethod
+    def _read_projection(columns):
+        # Fields the read path must fetch from Mongo for _decode_bucket to reconstruct a bucket.
+        # INDEX_COMPRESSION ('d') MUST be here: it selects the index codec ('pco' vs the lz4/byte
+        # codecs), and 'pco' is now the default writer. If it is dropped from the projection, Mongo
+        # omits it, doc.get(INDEX_COMPRESSION, 'lz4') silently falls back to lz4, and _decode_bucket
+        # tries to lz4-decompress pco-encoded index bytes -> LZ4BlockError on every real read.
+        proj = {SYMBOL: 1,
+                INDEX: 1,
+                INDEX_PRECISION: 1,
+                INDEX_COMPRESSION: 1,
+                START: 1,
+                END: 1,
+                VERSION: 1,
+                IMAGE_DOC: 1}
+        if columns:
+            for c in columns:
+                proj[COLUMNS + '.%s' % c] = 1
+        else:
+            proj[COLUMNS] = 1
+        return proj
+
     def _decode_bucket(self, doc, column_set, column_dtypes, include_symbol, include_images, columns):
         rtn = {}
         if doc[VERSION] != 3 and doc[VERSION] != CHUNK_VERSION_NUMBER_MAX:
@@ -907,8 +938,13 @@ class TickStore(object):
         end_ns = dt2ns(doc[END])
         assert start_ns % ns_prec == 0, (start_ns / ns_prec)
         assert end_ns % ns_prec == 0, (end_ns / ns_prec)
-        assert rtn[INDEX][0] * 1000_000 == start_ns
-        assert rtn[INDEX][-1] * 1000_000 == end_ns, (self._index_precision, rtn[INDEX][-1] * 1000_000, end_ns)
+        # rtn[INDEX] is uint64; for pre-epoch timestamps the first/last stamps are negative int64
+        # values reinterpreted to uint64, so `uint64_scalar * 1000_000` overflows (wraps mod 2^64)
+        # and the check spuriously fails. View as int64 first (zero-cost, matches the layout) -- the
+        # signed ms values * 1e6 fit comfortably in int64.
+        idx_i64 = rtn[INDEX].view(np.int64)
+        assert idx_i64[0] * 1000_000 == start_ns
+        assert idx_i64[-1] * 1000_000 == end_ns, (self._index_precision, idx_i64[-1] * 1000_000, end_ns)
 
         doc_length = len(rtn[INDEX])
         column_set.update(doc[COLUMNS].keys())
@@ -1601,7 +1637,9 @@ class TickStore(object):
         # also there is no safe check for monotony with uint64 input ?
         idx = np.diff(idx, prepend=np.int64(0))
         if len(idx) > 1 and idx[1:].min() < 0:
-            raise ValueError("non monotonic index")
+            # UnorderedDataException is a ValueError, so `except ValueError` callers are unaffected;
+            # this just unifies the type with _bucket_head / the ticks path ordering guards.
+            raise UnorderedDataException("non monotonic index")
         assert idx.dtype == np.int64
 
         # if idx[0] < 0:

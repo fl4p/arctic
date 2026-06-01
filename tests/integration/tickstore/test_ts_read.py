@@ -106,9 +106,11 @@ def test_read_allow_secondary(tickstore_lib):
                 df = tickstore_lib.read('FEED::SYMBOL', columns=['BID', 'ASK', 'PRICE'], allow_secondary=True)
     assert read_pref.call_args_list == [call(True)]
     assert with_options.call_args_list == [call(read_preference=ReadPreference.NEAREST)]
+    # 'd' is INDEX_COMPRESSION -- it MUST be projected so pco-compressed indexes decode (regression
+    # guard: without it the read silently falls back to lz4 and raises LZ4BlockError on pco buckets).
     assert find.call_args_list == [call({'sy': 'FEED::SYMBOL'}, sort=[('s', 1)], projection={'s': 1, '_id': 0}),
-                                   call({'sy': 'FEED::SYMBOL', 's': {'$lte': dt(2007, 8, 21, 3, 59, 47, 70000)}}, 
-                                        projection={'sy': 1, 'cs.PRICE': 1, 'i': 1, 'cs.BID': 1, 's': 1, 'im': 1, 'v': 1, 'cs.ASK': 1})]
+                                   call({'sy': 'FEED::SYMBOL', 's': {'$lte': dt(2007, 8, 21, 3, 59, 47, 70000)}},
+                                        projection={'sy': 1, 'cs.PRICE': 1, 'i': 1, 'p': 1, 'd': 1, 'cs.BID': 1, 's': 1, 'e': 1, 'im': 1, 'v': 1, 'cs.ASK': 1})]
 
     assert_array_equal(df['ASK'].values, np.array([1545.25, np.nan]))
     assert tickstore_lib._collection.find_one()['c'] == 2
