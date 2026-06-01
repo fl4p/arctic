@@ -740,5 +740,6 @@ def test_symbols_in_range(tickstore_lib):
     assert tickstore_lib.list_symbols(DateRange(20130104, 20130106), regex='^SYM') == ['SYMB']
     assert tickstore_lib.list_symbols(columns=['b', 'c'], regex='^OTH') == ['OTHER']
 
-    # symbols_in_range is a backwards-compatible alias of list_symbols.
-    assert tickstore_lib.symbols_in_range(regex='^SYM') == ['SYMA', 'SYMB']
+    # symbols_in_range is a deprecated alias that warns and delegates to list_symbols.
+    with pytest.warns(DeprecationWarning):
+        assert tickstore_lib.symbols_in_range(regex='^SYM') == ['SYMA', 'SYMB']
