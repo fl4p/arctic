@@ -61,9 +61,11 @@ codec whose `loss` implies >`rtol_max` error must set `rtol_max` accordingly (se
 | `LnQ15VQLlz4`  | `LnQ16_VQL(loss=15, lz4)` | 115 ppm | lz4 | prices, fast decode |
 | `LnQ20VQLgz`   | `LnQ16_VQL(loss=20, gz, prescale=20, preadd=1e-12)` | 154 ppm | gz | **general L2**, range [1e-15, 2e+32] |
 | `LnQ25VQLgz`   | `LnQ16_VQL(loss=25, gz)` | 194 ppm | gz | general L2, range [1e-13, 2e+27] |
-| `LnQ185VQLgz`  | `LnQ16_VQL(loss=1.85, gz, prescale=0, preadd=0)` | 16 ppm | gz | prices, down to 1e-45 |
+| `LnQ185VQLgz`  | `LnQ16_VQL(loss=1.85, gz, prescale=0, preadd=0)` | 16 ppm | gz | **deprecated for writes** → use `LnQ185pco` (still decodes) |
+| `LnQ185pco`    | `LnQ16_pco(loss=1.85, prescale=0, preadd=0)` | ~18 ppm | pcodec (`pco` crate) | **prices**, full float32 range (~1e-45…3.4e38); pco twin of `LnQ185VQLgz` |
 | `LnQ15gz`      | `LnQ16_zlib(loss=15)` (int32) | 115 ppm | gz | signed qty / volume (no autocorr) |
 | `LnQ15br9`     | `LnQ16(br_9, loss=15)` (int32) | 115 ppm | brotli q9 | qty, abs(x) ≥ 0.73e-11 |
+| `LnQ15pcoS`    | `LnQ16_pco(loss=15, prescale=37, preadd=1e-4, signed=True)` | 115 ppm | pcodec | **signed qty**, ~14% smaller than `LnQ15br9` |
 | `LnQ30brW10q10`| `LnQ16_VQL(loss=30, br_w10q10, prescale=20, preadd=1e-12)`, `rtol_max=250e-6` | 232 ppm | brotli q10/lgwin10 | smallest general L2 (slow encode) |
 | `LnQ30pco`     | `LnQ16_pco(loss=30, prescale=20, preadd=1e-12)`, `rtol_max=250e-6` | 232 ppm | pcodec (`pco` crate) | **general L2**, ~same size as brW10q10, ~37× cheaper encode |
 
@@ -105,6 +107,31 @@ TickStore column blob, it is only readable by TickStore — not a regression).
 > which none of the `LnQ*` codecs offer. Not registered as a TickStore codec (the column path is
 > inherently lossy-or-lz4), but it is the strongest lossless float option if ever needed — see
 > `find_coders.py --pco`.
+
+### `LnQ185pco` — wide-range price codec (replaces `LnQ185VQLgz`)
+
+Prices need a much wider dynamic range than the general L2 codecs: `LnQ30pco`/`LnQ20VQLgz`
+(`prescale=20`) compute `log(x·2²⁰ + …)`, which **overflows float32 above ~3.2e32** and is too coarse
+(232/154 ppm) for price precision. `LnQ185pco` keeps the exact grid the old `LnQ185VQLgz` used —
+`loss=1.85, prescale=0, preadd=0`, so `ln_q16` takes `log(x)` directly (no `2^prescale` factor to
+overflow) — giving **~18 ppm over the full positive float32 range (~1e-45 … 3.4e38)**. It stores the
+integer stream with **pcodec** instead of delta+varint+gz.
+
+Because the grid is identical, error and range match `LnQ185VQLgz` exactly; only size and speed change.
+On real price data (per-symbol, encoded in 4M-row buckets — the trade `tickstore_chunk_size`):
+
+| symbol | n | `LnQ185VQLgz` | `LnQ185pco` | ratio |
+|--------|--:|--------------:|------------:|------:|
+| BTCUSDT@binance_futures | 918 M | 0.076 B/val | 0.070 B/val | **92.2 %** |
+| XBTUSD@bitmex | 63 M | 0.358 B/val | 0.301 B/val | **84.1 %** |
+| FX_BTC_JPY@bitflyer | 8 M | 0.516 B/val | 0.450 B/val | **87.2 %** |
+| BCH-USDC@coinbasepro | 8 M | 0.581 B/val | 0.545 B/val | **93.8 %** |
+
+So **~6–16 % smaller than `LnQ185VQLgz`** at identical precision, plus pcodec's ~30–40× cheaper encode
+and ~3× cheaper decode. `LnQ185VQLgz` is therefore **deprecated for writes** (it stays registered so
+existing buckets decode); new price writes should use `LnQ185pco`. (For reference, `LnQ30pco` is ~17–27 %
+of `LnQ185VQLgz` here — far smaller, but that is loss=30/232 ppm, ~13× coarser, and overflow-prone on
+wide ranges; it is the *general L2* codec, not a price codec.)
 
 ## Index compression (`index_compressor`)
 
@@ -151,8 +178,10 @@ of the column `codec`: any combination works (e.g. `pco` index + `LnQ30pco` colu
    c.rtol_max = 250e-6                     # only if loss implies >200 ppm (the class default)
    register_codec('LnQ30brW10q10', c)      # name < 16 chars, unique
    ```
-3. Old data keeps decoding regardless — deprecating a codec only blocks *writes* (the three `*dzv*`
-   codecs are write-deprecated but still decode via `_decode_bucket`).
+3. Old data keeps decoding regardless — deprecating a codec only blocks *writes*. Two mechanisms:
+   the three `*dzv*` codecs are blocked by name in `_encode`; a **registered** codec is deprecated by
+   setting `coder.deprecated = '<replacement>'` (e.g. `LnQ185VQLgz`), which `_encode` rejects on write
+   while it stays in `codec_registry` so existing buckets still decode via `_decode_bucket`.
 
 Benchmark harness: `test/coding/find_coders.py` (jnb repo) — `--raw` (un-quantized influx data),
 `--frontier` (loss/size/error sweep), `--brotli` (quality×lgwin×mode grid), `--pco` (pcodec lossless

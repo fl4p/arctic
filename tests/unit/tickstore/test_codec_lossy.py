@@ -441,6 +441,27 @@ def test_arrays_to_dataframe_pandas_version_compat():
     assert df['a'].tolist() == [1., 2., 3.] and df['b'].tolist() == [4., 5., 6.]
 
 
+@pco_required
+def test_lnq185vqlgz_write_deprecated_but_still_decodes():
+    # LnQ185VQLgz is superseded by LnQ185pco (same grid/error, smaller, faster). New writes must be
+    # blocked, but it stays in the registry so buckets already written with it keep decoding.
+    assert 'LnQ185VQLgz' in codec_registry
+    assert getattr(codec_registry['LnQ185VQLgz'], 'deprecated', None) == 'LnQ185pco'
+
+    n = 2000
+    idx = pd.date_range('2024-01-01', periods=n, freq='1s', tz='UTC')
+    df = pd.DataFrame({'px': _autocorr_price(n)}, index=idx)
+    with pytest.raises(ArcticException):
+        TickStore._to_bucket_pandas(df, 'SYM', None, 1_000_000, codec='LnQ185VQLgz')
+
+    # decode path is unaffected: the codec object still round-trips (mirrors reading old data)
+    coder = codec_registry['LnQ185VQLgz']
+    x = df['px'].values.astype(np.float32)
+    got = coder.decode(coder.encode(x)).astype(np.float64)
+    rtol = float(np.max(np.abs(got - x.astype(np.float64)) / (np.abs(x) + 1e-10)))
+    assert rtol < 250e-6
+
+
 # --- full write->read bucket serialization (no mongo) ----------------------------
 def test_full_bucket_roundtrip_LnQ30brW10q10():
     n = 5000

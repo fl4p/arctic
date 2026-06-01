@@ -1,7 +1,8 @@
 ## Changelog
 
 ### Unreleased
- * Feature: register `LnQ185pco` — a wide-range pco column codec (loss=1.85, prescale=0, ~18ppm, full positive float32 range ~1e-45..3.4e38); the pco twin of `LnQ185VQLgz`, for price columns whose dynamic range exceeds `LnQ30pco`'s (~3.2e32, prescale=20).
+ * Feature: register `LnQ185pco` — a wide-range pco column codec (loss=1.85, prescale=0, ~18ppm, full positive float32 range ~1e-45..3.4e38); the pco twin of `LnQ185VQLgz`, for price columns whose dynamic range exceeds `LnQ30pco`'s (~3.2e32, prescale=20). ~6-16% smaller than `LnQ185VQLgz` on real price data, with ~30-40x cheaper encode / ~3x cheaper decode.
+ * Deprecation: `LnQ185VQLgz` is deprecated for writes (superseded by `LnQ185pco`); it stays registered so existing data still decodes. Registered codecs can now be write-deprecated via a `deprecated` attribute.
  * Bugfix: TickStore read dropped the `INDEX_COMPRESSION` field from the Mongo projection, so `pco`-compressed indexes (now the default) silently fell back to lz4 and raised `LZ4BlockError` on every real read.
  * Bugfix: TickStore read converted the decoded uint64 millisecond index to ns via `uint64 * int64`, which numpy promotes to float64 — corrupting sub-second timestamps (`.001ms` read back as `.000999936`). Whole-second values were unaffected, so only ms-resolution reads broke. Now done in int64.
  * Bugfix: TickStore `_decode_bucket` sanity asserts multiplied the uint64 index by 1e6, overflowing for pre-epoch (negative, uint64-reinterpreted) timestamps and raising a spurious `AssertionError`. Now viewed as int64 first.

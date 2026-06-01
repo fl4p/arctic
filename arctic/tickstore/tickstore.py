@@ -156,7 +156,12 @@ LnQ20VQLgz = LnQ16_VQL(loq_loss=20, comp='gz', log_prescale=20, loq_preadd=1e-12
 register_codec('LnQ20VQLgz', LnQ20VQLgz)  # for l2 data, general purpose [1e-15, 2e+32]
 
 register_codec('LnQ15br9', LnQ16('br_9', 15))  # for qty, 115ppm, abs(x) >= 0.73e-11
-register_codec('LnQ185VQLgz', LnQ16_VQL('gz', 1.85, 0, 0))  # for px 16ppm, down to 1e-45, then overflow
+# Deprecated for writes: superseded by LnQ185pco (same loss=1.85/prescale=0 grid -> identical ~18ppm
+# error and dynamic range, but ~6-15% smaller on real px and far cheaper to (de)code). Kept registered
+# so buckets already written with it still decode; only new writes are blocked.
+_LnQ185VQLgz = LnQ16_VQL('gz', 1.85, 0, 0)  # px 16ppm, down to 1e-45, then overflow
+_LnQ185VQLgz.deprecated = 'LnQ185pco'
+register_codec('LnQ185VQLgz', _LnQ185VQLgz)
 
 # brotli q10 + smallest window (lgwin=10) on the VQL pipeline: ~24-30% smaller than LnQ20VQLgz at
 # ~232ppm (loss=30 uses the full 250ppm budget). Decode ~1.9x the column-data cost of gz (the slower
@@ -1353,6 +1358,11 @@ class TickStore(object):
                     coder = codec_registry.get(codec_sel)
                     if coder is None:
                         raise ValueError("Unsupported codec: %s" % codec_sel)
+                    _dep = getattr(coder, 'deprecated', None)
+                    if _dep:
+                        raise ArcticException(
+                            "codec %s is deprecated for writes%s; existing data still decodes"
+                            % (codec_sel, (" -- use %s instead" % _dep) if isinstance(_dep, str) else ""))
                     if v.dtype != np.float32:
                         # The registry codecs operate on float32 (ln_q16 asserts it). Anything else here
                         # is either a non-float32 column or a gain-scaled to_dtype downcast (e.g. float16)
