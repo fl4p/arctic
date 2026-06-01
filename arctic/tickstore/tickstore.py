@@ -35,7 +35,7 @@ from ..date import DateRange, to_pandas_closed_closed, mktz, datetime_to_ms, ms_
 from ..decorators import mongo_retry
 from ..exceptions import OverlappingDataException, NoDataFoundException, UnorderedDataException, \
     UnhandledDtypeException, ArcticException
-from .._util import indent
+from .._util import indent, mongo_count
 
 try:
     from lz4.block import compress as lz4_compress, decompress as lz4_decompress
@@ -547,9 +547,8 @@ class TickStore(object):
         data_coll = self._collection.with_options(read_preference=self._read_preference(allow_secondary))
 
         cursor = data_coll.find(query, projection=projection).sort([(START, pymongo.ASCENDING)], )
-        num = data_coll.count(query)
+        num = mongo_count(data_coll, filter=query)
         if show_progress:
-            # num = data_coll.count(query)
             if num > 20:
                 cursor = progressbar(cursor, prefix=symbol, count=num)
 
@@ -648,7 +647,9 @@ class TickStore(object):
 
         date_range = to_pandas_closed_closed(date_range)
 
-        rtn, column_dtypes = self._fetch_and_decode(symbol, date_range, columns, include_images, allow_secondary,
+        rtn, column_dtypes = self._fetch_and_decode(symbol, date_range, columns,
+                                                    allow_secondary=allow_secondary,
+                                                    include_images=include_images,
                                                     show_progress=show_progress,
                                                     _target_tick_count=_target_tick_count)
 
@@ -692,11 +693,12 @@ class TickStore(object):
         rate = int(ticks / t) if t != 0 else float("nan")
         logger.info("%d rows in %s secs: %s ticks/sec" % (ticks, t, rate))
         if not rtn.index.is_monotonic_increasing:
-            print('non monotonic increasing index')
+            # The write path and _fetch_and_decode's cross-bucket overlap check should guarantee a
+            # monotonic result, so this is defence-in-depth. Recover by sorting (stable, to preserve
+            # the relative order of equal timestamps) rather than crashing the read.
             nmi = np.argmin(np.diff(rtn.index.values))
-            print('non monotonicy here:\n' + ('\n'.join(map(str, rtn.index.values[nmi - 2:nmi + 10]))))
-            assert False, (symbol, rtn.index.values[nmi - 2:nmi + 2])
-            logger.error("TimeSeries data is out of order, sorting!")
+            logger.error("TimeSeries data is out of order for %s, sorting! First disorder near:\n%s",
+                         symbol, '\n'.join(map(str, rtn.index.values[nmi - 2:nmi + 10])))
             rtn = rtn.sort_index(kind='mergesort')
 
         if date_range:
@@ -708,10 +710,14 @@ class TickStore(object):
             # if date_range.start > index[0] and date_range.end < index[-1]:
             # rtn1 = rtn.loc[date_range.start:date_range.end] # this is very sloooow
             # rtn = TickStore._fast_time_slice(rtn, date_range.start, date_range.end)
-            istart = np.searchsorted(idx_ns, dt2ns(date_range.start), side='left')
-            iend = np.searchsorted(idx_ns, dt2ns(date_range.end), side='right')
-            # istart = np.searchsorted(rtn.index, (date_range.start), side='left')
-            # iend = np.searchsorted(rtn.index, (date_range.end), side='right')
+            # Bound off the *final* frame index, not the original idx_ns: for a multi-symbol read
+            # the rows were argsorted (and the non-monotonic recovery above may have re-sorted them),
+            # so idx_ns no longer matches rtn's order -- searchsorted on it would return wrong bounds.
+            # rtn.index is a tz-aware DatetimeIndex; .values is datetime64[ns] in UTC, so view(int64)
+            # is ns-since-epoch UTC, matching dt2ns() (Timestamp.value). Sorted by construction here.
+            final_ns = rtn.index.values.view(np.int64)
+            istart = np.searchsorted(final_ns, dt2ns(date_range.start), side='left')
+            iend = np.searchsorted(final_ns, dt2ns(date_range.end), side='right')
             rtn = rtn.iloc[istart:iend]  # this is fast
 
             # assert len(rtn1) == len(rtn)

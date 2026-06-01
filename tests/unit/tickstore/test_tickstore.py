@@ -12,7 +12,7 @@ from arctic._compression import decompress
 from arctic.date import CLOSED_OPEN
 from arctic.date._daterange import DateRange
 from arctic.date._mktz import mktz
-from arctic.exceptions import UnorderedDataException
+from arctic.exceptions import UnorderedDataException, NoDataFoundException
 from arctic.tickstore.tickstore import TickStore, IMAGE_DOC, IMAGE, START, \
     DTYPE, END, COUNT, SYMBOL, COLUMNS, ROWMASK, DATA, INDEX, IMAGE_TIME, VERSION, INDEX_PRECISION
 
@@ -313,3 +313,24 @@ def test__read_preference__default_true():
 def test__read_preference__default_false():
     self = create_autospec(TickStore, _allow_secondary=False)
     assert TickStore._read_preference(self, None) == ReadPreference.PRIMARY
+
+
+@pytest.mark.parametrize("include_images,allow_secondary", [
+    (True, False),
+    (False, True),
+    (True, True),
+])
+def test_read_passes_flags_through_unswapped(include_images, allow_secondary):
+    # Regression: read() once called _fetch_and_decode positionally with include_images and
+    # allow_secondary in each other's slots, so include_images=True silently included no images
+    # *and* forced a secondary read (and vice versa). Lock the contract at the read() boundary:
+    # each flag must reach _fetch_and_decode under its own name.
+    self = create_autospec(TickStore)
+    self._fetch_and_decode.return_value = ({}, {})  # empty -> read() raises after the call
+
+    with pytest.raises(NoDataFoundException):
+        TickStore.read(self, 'sym', include_images=include_images, allow_secondary=allow_secondary)
+
+    _, kwargs = self._fetch_and_decode.call_args
+    assert kwargs['include_images'] is include_images
+    assert kwargs['allow_secondary'] is allow_secondary
