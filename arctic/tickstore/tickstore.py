@@ -867,7 +867,16 @@ class TickStore(object):
         # i.e. .001ms read back as .000999936); whole-second values stay exact, which is why only
         # ms-resolution reads were corrupted. view (not astype) as int64: zero-cost, bit-exact, and
         # it preserves the pre-epoch wraparound the uint64 layout encodes, keeping the product integer.
-        return np.concatenate(index_arrays).view(np.int64) * np.int64(1000_000)
+        #
+        # CRUCIAL: view each array to int64 BEFORE concatenating. The per-bucket index arrays are not
+        # all the same dtype -- v3 buckets decode to uint64 (np.frombuffer) while v4 buckets decode to
+        # int64 (nparray_varint_decode). np.concatenate of mixed uint64+int64 has no common integer
+        # type, so numpy upcasts the WHOLE result to float64; a later .view(np.int64) then reinterprets
+        # those float64 bit patterns as int64 -> garbage timestamps (e.g. year 2124/2262) and a
+        # non-monotonic index. This only bites reads that span the v3->v4 boundary; pure-v3 or pure-v4
+        # reads stay single-dtype and were unaffected. Viewing each array first keeps concatenate on a
+        # uniform int64 dtype (bit-exact for both uint64 and int64 inputs).
+        return np.concatenate([a.view(np.int64) for a in index_arrays]) * np.int64(1000_000)
 
     @staticmethod
     def _read_projection(columns):

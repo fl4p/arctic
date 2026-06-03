@@ -71,6 +71,25 @@ def test_numpy_diff_uint64_overflow():
     assert idx[1] == 2
 
 
+def test_index_ms_to_ns_mixed_dtype_buckets():
+    # Regression: v3 buckets decode the index to uint64, v4 (varint) buckets to int64. A read
+    # spanning the v3->v4 boundary feeds _index_ms_to_ns a mixed list; np.concatenate has no common
+    # integer dtype and upcasts to float64, and a naive `.view(np.int64)` then misreads the float64
+    # bits -> garbage far-future timestamps (year 2124/2262) and a non-monotonic index. Viewing each
+    # array to int64 *before* concatenating keeps it integer and bit-exact.
+    ms_u = np.array([1756339195870, 1756339195871], dtype=np.uint64)  # v3
+    ms_i = np.array([1756339196000, 1756339196001], dtype=np.int64)   # v4
+    ns = TickStore._index_ms_to_ns([ms_u, ms_i])
+    assert ns.dtype == np.int64
+    assert (ns == np.array([1756339195870, 1756339195871, 1756339196000, 1756339196001],
+                           dtype=np.int64) * 1_000_000).all()
+    assert (np.diff(ns) > 0).all()  # monotonic, no far-future blow-up
+
+    # pure-uint64 and pure-int64 lists stay correct too
+    for arr in (ms_u, ms_i):
+        assert (TickStore._index_ms_to_ns([arr]) == arr.astype(np.int64) * 1_000_000).all()
+
+
 def test_floor_divide():
     # the index-ceil trick used throughout the write path is -(-x // q) * q
     assert -(-2.0001 // 1) == 3
