@@ -4,8 +4,11 @@ import copy
 import datetime
 import logging
 import pickle
+import sys
+import time
 from collections import defaultdict
 from datetime import datetime as dt, timedelta
+from typing import List, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -35,7 +38,7 @@ from ..date import DateRange, to_pandas_closed_closed, mktz, datetime_to_ms, ms_
 from ..decorators import mongo_retry
 from ..exceptions import OverlappingDataException, NoDataFoundException, UnorderedDataException, \
     UnhandledDtypeException, ArcticException
-from .._util import indent
+from .._util import indent, mongo_count
 
 try:
     from lz4.block import compress as lz4_compress, decompress as lz4_decompress
@@ -218,6 +221,25 @@ def dt2ns(dt):
 
 def ns2dt(ns, **kwargs):
     return pd.to_datetime(ns, unit='ns', **kwargs)
+
+
+def _progressbar(it, count=None, prefix="", size=60, out=sys.stdout):  # Python3.6+
+    count = count or len(it)
+    start = time.time()  # time estimate start
+
+    def show(j):
+        x = int(size * j / count)
+        # time estimate calculation and string
+        remaining = ((time.time() - start) / j) * (count - j)
+        mins, sec = divmod(remaining, 60)  # limited to minutes
+        time_str = f"{int(mins):02}:{sec:03.1f}"
+        print(f" [{u'█' * x}{('.' * (size - x))}] {prefix} {j}/{count} Est wait {time_str}", end='\r', file=out,
+              flush=True)
+
+    for i, item in enumerate(it):
+        yield item
+        show(i + 1)
+    print("\n", flush=True, file=out)
 
 
 class TickStore(object):
@@ -411,8 +433,11 @@ class TickStore(object):
         pipeline = [{'$match': overlap_match(base)}, {'$group': {'_id': '$' + SYMBOL}}]
         return sorted(doc['_id'] for doc in coll.aggregate(pipeline, allowDiskUse=True))
 
-    # Backwards-compatible alias for the previous name of this method.
-    symbols_in_range = list_symbols
+    def symbols_in_range(self, *args, **kwargs):
+        """Deprecated alias for :meth:`list_symbols` (same signature)."""
+        warnings.warn("TickStore.symbols_in_range is deprecated; use list_symbols",
+                      DeprecationWarning, stacklevel=2)
+        return self.list_symbols(*args, **kwargs)
 
     def _mongo_date_range_query(self, symbol, date_range):
         # Handle date_range
@@ -503,28 +528,6 @@ class TickStore(object):
 
     def _fetch_and_decode(self, symbol, date_range, columns, allow_secondary, include_images, show_progress,
                           _target_tick_count):
-        import sys
-        import time
-
-        def progressbar(it, count=None, prefix="", size=60, out=sys.stdout):  # Python3.6+
-            count = count or len(it)
-            start = time.time()  # time estimate start
-
-            def show(j):
-                x = int(size * j / count)
-                # time estimate calculation and string
-                remaining = ((time.time() - start) / j) * (count - j)
-                mins, sec = divmod(remaining, 60)  # limited to minutes
-                time_str = f"{int(mins):02}:{sec:03.1f}"
-                print(f" [{u'█' * x}{('.' * (size - x))}] {prefix} {j}/{count} Est wait {time_str}", end='\r', file=out,
-                      flush=True)
-
-            # show(0.1)  # avoid div/0
-            for i, item in enumerate(it):
-                yield item
-                show(i + 1)
-            print("\n", flush=True, file=out)
-
         rtn = {}
         column_set = set()
 
@@ -547,11 +550,10 @@ class TickStore(object):
         data_coll = self._collection.with_options(read_preference=self._read_preference(allow_secondary))
 
         cursor = data_coll.find(query, projection=projection).sort([(START, pymongo.ASCENDING)], )
-        num = data_coll.count(query)
+        num = mongo_count(data_coll, filter=query)
         if show_progress:
-            # num = data_coll.count(query)
             if num > 20:
-                cursor = progressbar(cursor, prefix=symbol, count=num)
+                cursor = _progressbar(cursor, prefix=symbol, count=num)
 
         buckets = []
         for doc in cursor:
@@ -577,26 +579,19 @@ class TickStore(object):
                 assert not data.get(COLUMNS)
                 continue
             if data[INDEX][0] < t:
-                print(self._arctic_lib, symbol, '\noverlapping blocks=[\n')
-                print(',\n'.join(([repr(ms_to_iso((b[INDEX][0], b[INDEX][-1]))) for b in buckets])) + ']')
-
+                # Chunks are validated non-overlapping on write and fetched START-sorted, so this is
+                # defence-in-depth. Log the block layout for forensics (through the logger, not stdout,
+                # and only when this actually fires) and fail clearly rather than returning shuffled
+                # ticks. Equal-range blocks are usually just duplicates -- group them so the log shows
+                # whether that is the case, without the old per-block pickle asserts (which raised
+                # AssertionError before this ValueError, and compiled out entirely under `python -O`).
                 grouped = defaultdict(list)
                 for b in buckets:
-                    grouped[(b[INDEX][0], b[INDEX][-1])].append(b)
-
-                b2 = list(data_coll.find(query, projection={"_id": 1, "s": 1}).sort([(START, pymongo.ASCENDING)], ))
-                print(b2)
-
-                print('grouped:')
-                for (s, e), g in grouped.items():
-                    print(s, e, len(g))  # TODO _id
-                for (s, e), g in grouped.items():
-                    for b in g[1:]:
-                        assert (b[INDEX] == g[0][INDEX]).all()
-                        assert b.keys() == g[0].keys()
-                        assert pickle.dumps(b) == pickle.dumps(g[0])
-                        # if all these asserts pass, we known that the overlapping blocks are just duplicates
-
+                    if len(b[INDEX]):
+                        grouped[(b[INDEX][0], b[INDEX][-1])].append(b)
+                logger.error("%s %s: overlapping/out-of-order blocks. Ranges (start, end, count):\n%s",
+                             self._arctic_lib, symbol,
+                             '\n'.join('%s  x%d' % (ms_to_iso((s, e)), len(g)) for (s, e), g in grouped.items()))
                 raise ValueError('overlap block: prev ends at %s, curr start at %s' % ms_to_iso((t, data[INDEX][0])))
 
             assert data[INDEX][0] <= data[INDEX][-1]
@@ -621,8 +616,8 @@ class TickStore(object):
     def read(self, symbol, date_range=None, columns=None, include_images=False, allow_secondary=None,
              _target_tick_count=0, show_progress=False):
         """
-        Read data for the named symbol.  Returns a VersionedItem object with
-        a data and metdata element (as passed into write).
+        Read data for the named symbol. Returns a ``pandas.DataFrame`` of the stored ticks
+        (see the Returns section); use ``read_metadata`` for the per-symbol metadata.
 
         Parameters
         ----------
@@ -648,7 +643,9 @@ class TickStore(object):
 
         date_range = to_pandas_closed_closed(date_range)
 
-        rtn, column_dtypes = self._fetch_and_decode(symbol, date_range, columns, include_images, allow_secondary,
+        rtn, column_dtypes = self._fetch_and_decode(symbol, date_range, columns,
+                                                    allow_secondary=allow_secondary,
+                                                    include_images=include_images,
                                                     show_progress=show_progress,
                                                     _target_tick_count=_target_tick_count)
 
@@ -692,11 +689,12 @@ class TickStore(object):
         rate = int(ticks / t) if t != 0 else float("nan")
         logger.info("%d rows in %s secs: %s ticks/sec" % (ticks, t, rate))
         if not rtn.index.is_monotonic_increasing:
-            print('non monotonic increasing index')
+            # The write path and _fetch_and_decode's cross-bucket overlap check should guarantee a
+            # monotonic result, so this is defence-in-depth. Recover by sorting (stable, to preserve
+            # the relative order of equal timestamps) rather than crashing the read.
             nmi = np.argmin(np.diff(rtn.index.values))
-            print('non monotonicy here:\n' + ('\n'.join(map(str, rtn.index.values[nmi - 2:nmi + 10]))))
-            assert False, (symbol, rtn.index.values[nmi - 2:nmi + 2])
-            logger.error("TimeSeries data is out of order, sorting!")
+            logger.error("TimeSeries data is out of order for %s, sorting! First disorder near:\n%s",
+                         symbol, '\n'.join(map(str, rtn.index.values[nmi - 2:nmi + 10])))
             rtn = rtn.sort_index(kind='mergesort')
 
         if date_range:
@@ -708,10 +706,14 @@ class TickStore(object):
             # if date_range.start > index[0] and date_range.end < index[-1]:
             # rtn1 = rtn.loc[date_range.start:date_range.end] # this is very sloooow
             # rtn = TickStore._fast_time_slice(rtn, date_range.start, date_range.end)
-            istart = np.searchsorted(idx_ns, dt2ns(date_range.start), side='left')
-            iend = np.searchsorted(idx_ns, dt2ns(date_range.end), side='right')
-            # istart = np.searchsorted(rtn.index, (date_range.start), side='left')
-            # iend = np.searchsorted(rtn.index, (date_range.end), side='right')
+            # Bound off the *final* frame index, not the original idx_ns: for a multi-symbol read
+            # the rows were argsorted (and the non-monotonic recovery above may have re-sorted them),
+            # so idx_ns no longer matches rtn's order -- searchsorted on it would return wrong bounds.
+            # rtn.index is a tz-aware DatetimeIndex; .values is datetime64[ns] in UTC, so view(int64)
+            # is ns-since-epoch UTC, matching dt2ns() (Timestamp.value). Sorted by construction here.
+            final_ns = rtn.index.values.view(np.int64)
+            istart = np.searchsorted(final_ns, dt2ns(date_range.start), side='left')
+            iend = np.searchsorted(final_ns, dt2ns(date_range.end), side='right')
             rtn = rtn.iloc[istart:iend]  # this is fast
 
             # assert len(rtn1) == len(rtn)
