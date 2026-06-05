@@ -64,7 +64,7 @@ extensions = [
 
 setup(
     name="arctic",
-    version="1.84.12",
+    version="1.84.13",
     author="Man AHL Technology",
     author_email="arctic@man.com",
     description=("AHL Research Versioned TimeSeries and Tick store"),
@@ -85,7 +85,7 @@ setup(
                       "mockextras",
                       "pandas", #pandas<2
                       "numpy", #<2
-                      "pymongo>=3.6.0, <= 3.11.0",
+                      "pymongo>=3.6.0, <5.0",  # 4.x: per-DB authenticate() removed -> creds at client construction (auth.py / arctic._conn)
                       "pytz",
                       "tzlocal",
                       "lz4", "brotli","lz4",

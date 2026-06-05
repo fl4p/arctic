@@ -143,18 +143,29 @@ class Arctic(object):
 
             if self.__conn is None:
                 host = get_mongodb_uri(self.mongo_host)
+                # PyMongo 4 removed Database.authenticate(); credentials must be supplied at
+                # MongoClient construction. Fetch the admin creds up front and, ONLY on pymongo>=4,
+                # pass them to the client. On pymongo<4 nothing changes here -- the historical
+                # per-DB authenticate() path below stays byte-identical (no creds in the constructor).
+                auth = get_auth(self.mongo_host, self._application_name, 'admin')
+                client_kwargs = dict(self._pymongo_kwargs)
+                if auth and int(pymongo.version.split('.', 1)[0]) >= 4 and 'username' not in client_kwargs:
+                    client_kwargs['username'] = auth.user
+                    client_kwargs['password'] = auth.password
+                    client_kwargs.setdefault('authSource', 'admin')
+
                 logger.info("Connecting to mongo: {0} ({1} {2})".format(self.mongo_host, host, self._pymongo_kwargs))
                 self.__conn = pymongo.MongoClient(host=host,
                                                   maxPoolSize=self._MAX_CONNS,
                                                   socketTimeoutMS=self._socket_timeout,
                                                   connectTimeoutMS=self._connect_timeout,
                                                   serverSelectionTimeoutMS=self._server_selection_timeout,
-                                                  **self._pymongo_kwargs)
+                                                  **client_kwargs)
                 self._adminDB = self.__conn.admin
                 self._cache = Cache(self.__conn)
 
-                # Authenticate against admin for the user
-                auth = get_auth(self.mongo_host, self._application_name, 'admin')
+                # Authenticate against admin for the user (pymongo<4: real db.authenticate();
+                # pymongo>=4: authenticate() is a no-op shim, creds already applied above).
                 if auth:
                     authenticate(self._adminDB, auth.user, auth.password)
 
