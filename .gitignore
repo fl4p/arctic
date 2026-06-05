@@ -20,3 +20,5 @@ junit.xml
 .DS_Store
 
 *.c
+
+.vibe-drops/
