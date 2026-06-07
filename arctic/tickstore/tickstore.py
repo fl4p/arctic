@@ -242,6 +242,51 @@ def _progressbar(it, count=None, prefix="", size=60, out=sys.stdout):  # Python3
     print("\n", flush=True, file=out)
 
 
+def _reprobe_bucket(collection, doc, decode_fn):
+    """On a bucket decode failure, re-fetch the SAME doc from mongo by _id and retry the decode ONCE to
+    distinguish a TRANSIENT torn/short read (re-fetch decodes clean -> the bytes at rest are fine, the
+    in-flight copy was truncated) from CORRUPT-AT-REST data (re-fetch fails identically). Best-effort and
+    fully self-contained: it must NEVER raise -- any probe failure (incl. no collection, e.g. a no-DB decode)
+    just downgrades the verdict to UNKNOWN so the ORIGINAL decode error is never masked. Returns
+    (verdict, detail) strings."""
+    if collection is None:
+        return 'CLASSIFY=UNKNOWN', 'no collection on this reader (cannot re-fetch)'
+    _id = doc.get(ID)
+    if _id is None:
+        return 'CLASSIFY=UNKNOWN', 'no _id on the projected doc (cannot re-fetch)'
+    try:
+        fresh = collection.find_one({ID: _id})  # full doc; decode_fn touches only its own field
+    except Exception as e:
+        return 'CLASSIFY=UNKNOWN', 're-fetch errored: %r' % (e,)
+    if fresh is None:
+        return 'CLASSIFY=UNKNOWN', 're-fetch returned no doc (deleted/rewritten since)'
+    try:
+        decode_fn(fresh)
+    except Exception as e:
+        return 'CLASSIFY=CORRUPT-AT-REST', 're-fetch decoded identically-bad: %r' % (e,)
+    return 'CLASSIFY=TRANSIENT', 're-fetch decoded clean -> torn/short read in flight (data at rest is OK)'
+
+
+def _decode_or_classify(collection, doc, what, decode_fn):
+    """Run a (pco-prone) bucket decode; on ANY failure, enrich the opaque codec error with the bucket's
+    identity (symbol + date-range + _id + lib) and a TRANSIENT-vs-CORRUPT classification from a single mongo
+    re-fetch probe, then re-raise (chaining the original). Turns a bare 'pco error: ...' into a record that
+    NAMES the bad bucket and says whether a re-read fixes it -- captured verbatim by callers (e.g.
+    lib.exec.cluster's per-task failure log). `decode_fn(d)` decodes from a doc `d` so the SAME logic runs on
+    the original and on the re-fetched copy; `collection` is the reader's mongo collection (None in a no-DB
+    decode -> verdict UNKNOWN). The success path never touches `collection`."""
+    try:
+        return decode_fn(doc)
+    except Exception as orig:
+        verdict, detail = _reprobe_bucket(collection, doc, decode_fn)
+        raise ArcticException(
+            'tickstore decode failed [%s]: symbol=%s bucket=[%s .. %s] _id=%s idx_codec=%s ver=%s lib=%s '
+            '-- %s (%s); original: %r' % (
+                what, doc.get(SYMBOL), doc.get(START), doc.get(END), doc.get(ID),
+                doc.get(INDEX_COMPRESSION, 'lz4'), doc.get(VERSION),
+                getattr(collection, 'name', '?'), verdict, detail, orig)) from orig
+
+
 class TickStore(object):
 
     @classmethod
@@ -910,19 +955,16 @@ class TickStore(object):
         # INDEX_COMPRESSION selects the index codec; absent -> 'lz4' (the legacy default). 'pco' stores
         # the uint64 delta array directly with pcodec (no varint/lz4 wrapping); any other value is a
         # byte->byte compressor from binary_decompressors wrapping the version-keyed varint/raw layout.
-        index_compression = doc.get(INDEX_COMPRESSION, 'lz4')
-        if index_compression == 'pco':
-            idx = pco_decode(doc[INDEX])  # uint64 deltas (idx[0] is the absolute first stamp)
-        else:
-            decompress = binary_decompressors.get(index_compression)
+        def _decode_index(d):
+            ic = d.get(INDEX_COMPRESSION, 'lz4')
+            if ic == 'pco':
+                return pco_decode(d[INDEX])  # uint64 deltas (idx[0] is the absolute first stamp)
+            decompress = binary_decompressors.get(ic)
             if decompress is None:
-                raise ArcticException("Unknown index compression: %s" % index_compression)
-            buf = decompress(doc[INDEX])
-            if doc[VERSION] == 4:
-                idx = nparray_varint_decode(buf)
-            else:
-                idx = np.frombuffer(buf, dtype='uint64')
-            del buf
+                raise ArcticException("Unknown index compression: %s" % ic)
+            buf = decompress(d[INDEX])
+            return nparray_varint_decode(buf) if d[VERSION] == 4 else np.frombuffer(buf, dtype='uint64')
+        idx = _decode_or_classify(getattr(self, '_collection', None), doc, 'index', _decode_index)
         # Defence-in-depth on read: idx[0] is the absolute first stamp and idx[1:] are the deltas,
         # stored as int64 reinterpreted to uint64 (so the old `idx[1:].min() >= 0` check on uint64 was
         # always true and caught nothing). View the deltas back as signed: a negative one means a
@@ -1001,7 +1043,10 @@ class TickStore(object):
                         coder = codec_registry.get(codec)
                         if coder is None:
                             raise ArcticException("unknown codec: %s" % codec)
-                        values = coder.decode(coldata[DATA])
+                        # LnQ16_pco and any registry codec decode here; classify torn-vs-corrupt on failure
+                        values = _decode_or_classify(
+                            getattr(self, '_collection', None), doc, 'column:%s' % c,
+                            lambda d, _c=c, _coder=coder: _coder.decode(d[COLUMNS][_c][DATA]))
                     if values.dtype != dtype:
                         values = values.astype(dtype)
                 else:
