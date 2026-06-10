@@ -289,6 +289,27 @@ def _decode_or_classify(collection, doc, what, decode_fn):
 
 class TickStore(object):
 
+    # --- write/delete observer seam -----------------------------------------------------
+    # Policy-free hooks so a host app can react to data-visibility changes (e.g. invalidate
+    # an external chunk cache after a historical backfill) WITHOUT this storage library
+    # importing the app. Observers are registered by the app at import time; the fork stays
+    # generic and droppable. Each observer is best-effort: it runs AFTER the storage mutation
+    # has succeeded and any exception it raises is swallowed, so a broken hook can never fail
+    # (or roll back) a write/delete. See lib/data/arctic_store.py for the registered hook.
+    #   write  observer signature: fn(lib_name: str, symbol: str, start, end)   # start/end = written range
+    #   delete observer signature: fn(lib_name: str, symbol: str, date_range)   # date_range may be None (full delete)
+    _write_observers = []
+    _delete_observers = []
+
+    @staticmethod
+    def _notify(observers, *args):
+        for ob in observers:
+            try:
+                ob(*args)
+            except Exception:
+                # The storage mutation already committed; a hook must never break it.
+                pass
+
     @classmethod
     def initialize_library(cls, arctic_lib, **kwargs):
         TickStore(arctic_lib)._ensure_index()
@@ -374,7 +395,9 @@ class TickStore(object):
         else:
             # delete metadata on complete deletion
             self._metadata.delete_one({SYMBOL: symbol})
-        return self._collection.delete_many(query)
+        res = self._collection.delete_many(query)
+        TickStore._notify(self._delete_observers, self._arctic_lib.get_name(), symbol, date_range)
+        return res
 
     def list_symbols(self, date_range=None, columns=None, regex=None) -> list:
         """
@@ -1187,6 +1210,10 @@ class TickStore(object):
             self._metadata.replace_one({SYMBOL: symbol},
                                        {SYMBOL: symbol, META: metadata},
                                        upsert=True)
+
+        # `start, end` (computed above) is the written range; observers use it to decide
+        # whether the write touched a cacheable (already-frozen) region. See the seam doc.
+        TickStore._notify(self._write_observers, self._arctic_lib.get_name(), symbol, start, end)
 
     @staticmethod
     def _get_buckets_size_stats_idm(buckets):
